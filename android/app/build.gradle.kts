@@ -25,6 +25,9 @@ android {
     buildTypes {
         release {
             signingConfig = signingConfigs.getByName("debug")
+            // Disattiva la minificazione per evitare crash sui plugin nativi
+            isMinifyEnabled = false
+            isShrinkResources = false
         }
     }
 }
