@@ -1,10 +1,15 @@
+import 'dart:io';
+import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
+import 'package:video_player/video_player.dart';
+
 import '../../models/p2p_packet.dart';
 import '../../models/peer_node.dart';
 import '../../providers/p2p_controller.dart';
+
+enum LeftSidebarTab { allPeers, savedContacts, chats, fileHistory }
 
 class AdaptiveHomeScreen extends StatefulWidget {
   const AdaptiveHomeScreen({super.key});
@@ -14,145 +19,104 @@ class AdaptiveHomeScreen extends StatefulWidget {
 }
 
 class _AdaptiveHomeScreenState extends State<AdaptiveHomeScreen> {
-  final TextEditingController _textController = TextEditingController();
-  final TextEditingController _aliasController = TextEditingController();
-  final ScrollController _chatScrollController = ScrollController();
-  int _activeTabIndex = 0; // 0: Radar/Dispositivi, 1: Chat, 2: Impostazioni
+  LeftSidebarTab _activeTab = LeftSidebarTab.allPeers;
+  String _historyFilter = 'sent'; // 'sent', 'received', 'all'
+  final TextEditingController _msgController = TextEditingController();
+  final Map<String, ScrollController> _chatScrollControllers = {};
 
-  @override
-  void initState() {
-    super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
-      final ctrl = context.read<P2PController>();
-      _aliasController.text = ctrl.localAlias;
-    });
+  ScrollController _scrollControllerForPeer(String peerId) {
+    return _chatScrollControllers.putIfAbsent(
+      peerId,
+      () => ScrollController(),
+    );
   }
 
   @override
   void dispose() {
-    _textController.dispose();
-    _aliasController.dispose();
-    _chatScrollController.dispose();
+    _msgController.dispose();
+    for (final c in _chatScrollControllers.values) {
+      c.dispose();
+    }
     super.dispose();
   }
 
-  void _copyIpToClipboard(BuildContext context, String ip) {
-    Clipboard.setData(ClipboardData(text: ip));
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text('Indirizzo IP copiato negli appunti: $ip'),
-        behavior: SnackBarBehavior.floating,
-        duration: const Duration(seconds: 2),
-      ),
-    );
+  String _formatBytes(int bytes) {
+    if (bytes <= 0) return '0 B';
+    const suffixes = ['B', 'KB', 'MB', 'GB', 'TB'];
+    int i = 0;
+    double size = bytes.toDouble();
+    while (size >= 1024 && i < suffixes.length - 1) {
+      size /= 1024;
+      i++;
+    }
+    return '${size.toStringAsFixed(i == 0 ? 0 : 2)} ${suffixes[i]}';
   }
 
-  Future<void> _showConnectByIpDialog(
-    BuildContext context,
-    P2PController controller,
-  ) async {
-    final ipCtrl = TextEditingController();
-    final aliasCtrl = TextEditingController();
-    final portCtrl =
-        TextEditingController(text: controller.tcpPort.toString());
+  bool _isImageFile(String name) {
+    final ext = name.toLowerCase();
+    return ext.endsWith('.jpg') ||
+        ext.endsWith('.jpeg') ||
+        ext.endsWith('.png') ||
+        ext.endsWith('.gif') ||
+        ext.endsWith('.webp') ||
+        ext.endsWith('.bmp');
+  }
 
-    await showDialog(
+  bool _isAudioFile(String name) {
+    final ext = name.toLowerCase();
+    return ext.endsWith('.mp3') ||
+        ext.endsWith('.wav') ||
+        ext.endsWith('.ogg') ||
+        ext.endsWith('.m4a') ||
+        ext.endsWith('.aac') ||
+        ext.endsWith('.flac');
+  }
+
+  bool _isVideoFile(String name) {
+    final ext = name.toLowerCase();
+    return ext.endsWith('.mp4') ||
+        ext.endsWith('.mov') ||
+        ext.endsWith('.mkv') ||
+        ext.endsWith('.webm') ||
+        ext.endsWith('.avi');
+  }
+
+  bool _isTextFile(String name) {
+    final ext = name.toLowerCase();
+    return ext.endsWith('.txt') ||
+        ext.endsWith('.md') ||
+        ext.endsWith('.json') ||
+        ext.endsWith('.log') ||
+        ext.endsWith('.csv') ||
+        ext.endsWith('.xml') ||
+        ext.endsWith('.yaml') ||
+        ext.endsWith('.dart') ||
+        ext.endsWith('.py');
+  }
+
+  void _openFilePreview(
+    BuildContext context, {
+    required String fileName,
+    required String? filePath,
+  }) {
+    if (filePath == null || !File(filePath).existsSync()) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Il file locale non è più presente sul disco.'),
+        ),
+      );
+      return;
+    }
+
+    showDialog(
       context: context,
-      builder: (ctx) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        title: const Row(
-          children: [
-            Icon(Icons.wifi_tethering_rounded, color: Color(0xFF38BDF8)),
-            SizedBox(width: 10),
-            Expanded(child: Text('Connetti tramite IP Wi-Fi')),
-          ],
-        ),
-        content: SizedBox(
-          width: 420,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text(
-                'Inserisci l\'indirizzo IPv4 mostrato nel riquadro in alto sull\'altro dispositivo (PC o S25 Ultra).',
-                style: TextStyle(fontSize: 13, color: Color(0xFF94A3B8)),
-              ),
-              const SizedBox(height: 16),
-              TextField(
-                controller: ipCtrl,
-                autofocus: true,
-                // TextInputType.url mostra sempre il punto (.) anche sulla tastiera Samsung!
-                keyboardType: TextInputType.url,
-                decoration: InputDecoration(
-                  labelText: 'Indirizzo IP del dispositivo',
-                  hintText: 'es. 192.168.1.45',
-                  prefixIcon: const Icon(Icons.lan_outlined),
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 12),
-              Row(
-                children: [
-                  Expanded(
-                    flex: 2,
-                    child: TextField(
-                      controller: aliasCtrl,
-                      decoration: InputDecoration(
-                        labelText: 'Nome (opzionale)',
-                        hintText: 'es. PC Desktop / S25',
-                        prefixIcon: const Icon(Icons.badge_outlined),
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: TextField(
-                      controller: portCtrl,
-                      keyboardType: TextInputType.number,
-                      decoration: InputDecoration(
-                        labelText: 'Porta',
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Annulla'),
-          ),
-          FilledButton.icon(
-            onPressed: () async {
-              final ip = ipCtrl.text.trim();
-              if (ip.isEmpty) return;
-              final port =
-                  int.tryParse(portCtrl.text.trim()) ?? controller.tcpPort;
-              Navigator.pop(ctx);
-              await controller.connectByIp(
-                ipAddress: ip,
-                customAlias: aliasCtrl.text.trim(),
-                port: port,
-              );
-              if (mounted) {
-                setState(() => _activeTabIndex = 1);
-              }
-            },
-            icon: const Icon(Icons.bolt_rounded),
-            label: const Text('Connetti'),
-          ),
-        ],
+      builder: (_) => _FilePreviewDialog(
+        fileName: fileName,
+        filePath: filePath,
+        isImage: _isImageFile(fileName),
+        isAudio: _isAudioFile(fileName),
+        isVideo: _isVideoFile(fileName),
+        isText: _isTextFile(fileName),
       ),
     );
   }
@@ -160,1215 +124,1408 @@ class _AdaptiveHomeScreenState extends State<AdaptiveHomeScreen> {
   @override
   Widget build(BuildContext context) {
     final controller = context.watch<P2PController>();
-    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final bool isWide = MediaQuery.of(context).size.width >= 820;
 
-    // Se siamo sulla scheda Chat (mobile) e il nodo si disconnette o cambia rete,
-    // torna automaticamente alla lista dei dispositivi!
-    if (_activeTabIndex == 1 && controller.selectedPeer == null) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted && _activeTabIndex == 1 && controller.selectedPeer == null) {
-          setState(() => _activeTabIndex = 0);
-        }
-      });
-    }
-
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final bool isDesktop = constraints.maxWidth >= 900;
-
-        if (isDesktop) {
-          return Scaffold(
-            body: Row(
-              children: [
-                NavigationRail(
-                  backgroundColor: isDark
-                      ? const Color(0xFF0F172A)
-                      : const Color(0xFFF1F5F9),
-                  selectedIndex: _activeTabIndex == 2 ? 1 : 0,
-                  onDestinationSelected: (idx) {
-                    setState(() => _activeTabIndex = idx == 1 ? 2 : 0);
-                  },
-                  labelType: NavigationRailLabelType.all,
-                  leading: Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 18),
-                    child: Container(
-                      width: 46,
-                      height: 46,
-                      decoration: BoxDecoration(
-                        gradient: const LinearGradient(
-                          colors: [Color(0xFF38BDF8), Color(0xFF6366F1)],
-                          begin: Alignment.topLeft,
-                          end: Alignment.bottomRight,
-                        ),
-                        borderRadius: BorderRadius.circular(14),
-                      ),
-                      child: const Icon(
-                        Icons.wifi_tethering_rounded,
-                        color: Colors.white,
-                        size: 26,
-                      ),
+    return Scaffold(
+      appBar: AppBar(
+        title: Row(
+          children: [
+            const Icon(Icons.radar_rounded),
+            const SizedBox(width: 10),
+            Flexible(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'LanPulse P2P • ${controller.localAlias}',
+                    style: const TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
                     ),
+                    overflow: TextOverflow.ellipsis,
                   ),
-                  destinations: [
-                    NavigationRailDestination(
-                      icon: Badge(
-                        isLabelVisible: controller.peers.isNotEmpty,
-                        label: Text('${controller.peers.length}'),
-                        child: const Icon(Icons.radar_outlined),
-                      ),
-                      selectedIcon: const Icon(Icons.radar_rounded),
-                      label: const Text('Rete & Chat'),
-                    ),
-                    const NavigationRailDestination(
-                      icon: Icon(Icons.tune_rounded),
-                      selectedIcon: Icon(Icons.settings_rounded),
-                      label: Text('Settings'),
-                    ),
-                  ],
-                ),
-                const VerticalDivider(width: 1),
-                if (_activeTabIndex == 2)
-                  Expanded(child: _buildSettingsView(context, controller))
-                else ...[
-                  SizedBox(
-                    width: 380,
-                    child: _buildPeersSidebar(
-                      context,
-                      controller,
-                      isDesktop: true,
-                    ),
-                  ),
-                  const VerticalDivider(width: 1),
-                  Expanded(
-                    child: _buildConversationWorkspace(
-                      context,
-                      controller,
-                      isDesktop: true,
+                  Text(
+                    'IP Wi-Fi: ${controller.localIp ?? "Ricerca rete..."} : ${controller.tcpPort}',
+                    style: TextStyle(
+                      fontSize: 11.5,
+                      color: Theme.of(context).colorScheme.primary,
                     ),
                   ),
                 ],
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          IconButton(
+            tooltip: 'Aggiungi Host via IP',
+            icon: const Icon(Icons.add_link_rounded),
+            onPressed: () => _showConnectByIpDialog(context, controller),
+          ),
+          IconButton(
+            tooltip: 'Scansiona Rete Wi-Fi',
+            icon: controller.isScanningWifi
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.refresh_rounded),
+            onPressed:
+                controller.isScanningWifi ? null : controller.refreshNetwork,
+          ),
+          IconButton(
+            tooltip: 'Temi, Stili e Login Google',
+            icon: const Icon(Icons.palette_outlined),
+            onPressed: () => _showSettingsAndThemesSheet(context, controller),
+          ),
+        ],
+      ),
+      body: Column(
+        children: [
+          // Banner notifiche di stato o errori
+          if (controller.errorBanner != null)
+            MaterialBanner(
+              backgroundColor: controller.isBannerError
+                  ? Colors.red.withValues(alpha: 0.15)
+                  : Theme.of(context).colorScheme.primaryContainer,
+              content: Text(controller.errorBanner!),
+              leading: Icon(
+                controller.isBannerError
+                    ? Icons.error_outline
+                    : Icons.info_outline,
+              ),
+              actions: [
+                TextButton(
+                  onPressed: controller.clearError,
+                  child: const Text('CHIUDI'),
+                ),
               ],
             ),
-          );
-        }
 
-        // Layout Mobile (Samsung S25 Ultra)
-        return Scaffold(
-          body: SafeArea(
-            child: IndexedStack(
-              index: _activeTabIndex,
-              children: [
-                _buildPeersSidebar(context, controller, isDesktop: false),
-                _buildConversationWorkspace(
-                  context,
-                  controller,
-                  isDesktop: false,
-                ),
-                _buildSettingsView(context, controller),
-              ],
+          // Richieste MANDATORIE di ricezione file in entrata (per gli host non fidati)
+          for (final reqItem in controller.pendingFileRequests)
+            _buildMandatoryFileRequestBanner(context, controller, reqItem),
+
+          // Barra progresso trasferimento attivo
+          if (controller.isTransferring)
+            LinearProgressIndicator(
+              value: controller.activeTransferProgress > 0
+                  ? controller.activeTransferProgress
+                  : null,
+              minHeight: 5,
             ),
+
+          // Barra rapida per scorrere le DIVERSE chat aperte/salvate
+          if (controller.activeChatPeers.isNotEmpty)
+            _buildChatSwitcherBar(context, controller),
+
+          // Contenuto principale
+          Expanded(
+            child: isWide
+                ? Row(
+                    children: [
+                      SizedBox(
+                        width: 340,
+                        child: _buildSidebar(context, controller),
+                      ),
+                      const VerticalDivider(width: 1),
+                      Expanded(
+                        child: _activeTab == LeftSidebarTab.fileHistory
+                            ? _buildFileHistoryView(context, controller)
+                            : _buildChatArea(context, controller),
+                      ),
+                    ],
+                  )
+                : (_activeTab == LeftSidebarTab.fileHistory
+                    ? Column(
+                        children: [
+                          _buildMobileTopTabs(controller),
+                          Expanded(
+                            child: _buildFileHistoryView(context, controller),
+                          ),
+                        ],
+                      )
+                    : (controller.selectedPeer == null
+                        ? Column(
+                            children: [
+                              _buildMobileTopTabs(controller),
+                              Expanded(
+                                child: _buildSidebar(context, controller),
+                              ),
+                            ],
+                          )
+                        : _buildChatArea(context, controller, isMobile: true))),
           ),
-          bottomNavigationBar: NavigationBar(
-            selectedIndex: _activeTabIndex,
-            onDestinationSelected: (idx) =>
-                setState(() => _activeTabIndex = idx),
-            destinations: [
-              NavigationDestination(
-                icon: Badge(
-                  isLabelVisible: controller.peers.isNotEmpty,
-                  label: Text('${controller.peers.length}'),
-                  child: const Icon(Icons.radar_outlined),
-                ),
-                selectedIcon: const Icon(Icons.radar_rounded),
-                label: 'Dispositivi',
-              ),
-              NavigationDestination(
-                icon: Badge(
-                  isLabelVisible: controller.selectedPeer != null,
-                  backgroundColor: Colors.greenAccent,
-                  child: const Icon(Icons.chat_bubble_outline_rounded),
-                ),
-                selectedIcon: const Icon(Icons.chat_bubble_rounded),
-                label: 'Chat & File',
-              ),
-              const NavigationDestination(
-                icon: Icon(Icons.tune_rounded),
-                selectedIcon: Icon(Icons.settings_rounded),
-                label: 'Impostazioni',
-              ),
-            ],
-          ),
-        );
-      },
+        ],
+      ),
     );
   }
 
-  Widget _buildPeersSidebar(
+  /// Banner interattivo obbligatorio quando un host NON fidato chiede di inviare un file
+  Widget _buildMandatoryFileRequestBanner(
     BuildContext context,
-    P2PController controller, {
-    required bool isDesktop,
-  }) {
-    final bool hasIp = controller.localIp != null;
-    final String ipDisplay = controller.localIp ?? 'Nessuna Wi-Fi rilevata';
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        // Dashboard Hero Card (Rete + IP + Azioni Rapide)
-        Container(
-          margin: const EdgeInsets.fromLTRB(16, 16, 16, 8),
-          padding: const EdgeInsets.all(18),
-          decoration: BoxDecoration(
-            gradient: const LinearGradient(
-              colors: [Color(0xFF0F172A), Color(0xFF1E293B)],
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-            ),
-            borderRadius: BorderRadius.circular(20),
-            border: Border.all(
-              color: const Color(0xFF38BDF8).withValues(alpha: 0.3),
-            ),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withValues(alpha: 0.2),
-                blurRadius: 14,
-                offset: const Offset(0, 6),
+    P2PController controller,
+    PendingRequestItem item,
+  ) {
+    final req = item.request;
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.tertiaryContainer,
+        borderRadius:
+            BorderRadius.circular(controller.uiStyle.borderRadius),
+        border: Border.all(
+          color: Theme.of(context).colorScheme.tertiary,
+          width: 1.5,
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.notifications_active_rounded, size: 22),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  'Richiesta di invio file da ${req.senderAlias} (${req.senderIp})',
+                  style: const TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 14.5,
+                  ),
+                ),
               ),
             ],
           ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+          const SizedBox(height: 6),
+          Text(
+            'File: "${req.fileName}" • Dimensione: ${_formatBytes(req.fileSizeBytes)}',
+            style: const TextStyle(fontSize: 13),
+          ),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            alignment: WrapAlignment.end,
             children: [
-              // Riga Titolo + Badge Stato Rete Live
-              Row(
-                children: [
-                  Container(
-                    width: 10,
-                    height: 10,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: hasIp ? Colors.greenAccent : Colors.amber,
+              OutlinedButton.icon(
+                icon: const Icon(Icons.close_rounded, size: 18),
+                label: const Text('Rifiuta'),
+                onPressed: () => controller.respondToFileRequest(
+                  item,
+                  accept: false,
+                ),
+              ),
+              FilledButton.tonalIcon(
+                icon: const Icon(Icons.check_rounded, size: 18),
+                label: const Text('Accetta questa volta'),
+                onPressed: () => controller.respondToFileRequest(
+                  item,
+                  accept: true,
+                  trustSender: false,
+                ),
+              ),
+              FilledButton.icon(
+                icon: const Icon(Icons.verified_user_rounded, size: 18),
+                label: const Text('Accetta e Salva come Fidato'),
+                onPressed: () => controller.respondToFileRequest(
+                  item,
+                  accept: true,
+                  trustSender: true,
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Barra orizzontale per scorrere rapidamente le diverse chat attive e salvate
+  Widget _buildChatSwitcherBar(
+    BuildContext context,
+    P2PController controller,
+  ) {
+    final chats = controller.activeChatPeers;
+    return Container(
+      height: 50,
+      padding: const EdgeInsets.symmetric(horizontal: 8),
+      decoration: BoxDecoration(
+        border: Border(
+          bottom: BorderSide(
+            color: Theme.of(context).dividerColor.withValues(alpha: 0.2),
+          ),
+        ),
+      ),
+      child: Row(
+        children: [
+          IconButton(
+            tooltip: 'Chat precedente',
+            icon: const Icon(Icons.chevron_left_rounded),
+            onPressed: () => controller.cycleActiveChat(-1),
+          ),
+          Expanded(
+            child: ListView.separated(
+              scrollDirection: Axis.horizontal,
+              itemCount: chats.length,
+              separatorBuilder: (_, __) => const SizedBox(width: 6),
+              itemBuilder: (context, index) {
+                final peer = chats[index];
+                final bool isSelected =
+                    controller.selectedPeer?.nodeId == peer.nodeId;
+                final int unread = controller.unreadCountForPeer(peer.nodeId);
+
+                return Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 6),
+                  child: ChoiceChip(
+                    selected: isSelected,
+                    onSelected: (_) {
+                      setState(() {
+                        if (_activeTab == LeftSidebarTab.fileHistory) {
+                          _activeTab = LeftSidebarTab.chats;
+                        }
+                      });
+                      controller.selectPeer(peer);
+                    },
+                    avatar: Icon(
+                      peer.isTrusted ? Icons.star_rounded : Icons.chat_bubble,
+                      size: 16,
+                      color: peer.isOnline ? Colors.greenAccent : Colors.grey,
+                    ),
+                    label: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(peer.alias),
+                        if (unread > 0) ...[
+                          const SizedBox(width: 6),
+                          CircleAvatar(
+                            radius: 9,
+                            backgroundColor:
+                                Theme.of(context).colorScheme.error,
+                            child: Text(
+                              '$unread',
+                              style: const TextStyle(
+                                fontSize: 10,
+                                color: Colors.white,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ],
                     ),
                   ),
-                  const SizedBox(width: 8),
+                );
+              },
+            ),
+          ),
+          IconButton(
+            tooltip: 'Chat successiva',
+            icon: const Icon(Icons.chevron_right_rounded),
+            onPressed: () => controller.cycleActiveChat(1),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildMobileTopTabs(P2PController controller) {
+    return Padding(
+      padding: const EdgeInsets.all(8.0),
+      child: SegmentedButton<LeftSidebarTab>(
+        segments: [
+          const ButtonSegment(
+            value: LeftSidebarTab.allPeers,
+            icon: Icon(Icons.wifi_tethering, size: 18),
+            label: Text('Nodi'),
+          ),
+          const ButtonSegment(
+            value: LeftSidebarTab.savedContacts,
+            icon: Icon(Icons.star_rounded, size: 18),
+            label: Text('Contatti'),
+          ),
+          const ButtonSegment(
+            value: LeftSidebarTab.chats,
+            icon: Icon(Icons.forum_outlined, size: 18),
+            label: Text('Chat'),
+          ),
+          ButtonSegment(
+            value: LeftSidebarTab.fileHistory,
+            icon: const Icon(Icons.history_rounded, size: 18),
+            label: Text('File (${controller.fileHistory.length})'),
+          ),
+        ],
+        selected: {_activeTab},
+        onSelectionChanged: (s) => setState(() => _activeTab = s.first),
+      ),
+    );
+  }
+
+  Widget _buildSidebar(BuildContext context, P2PController controller) {
+    final List<PeerNode> displayedPeers = switch (_activeTab) {
+      LeftSidebarTab.savedContacts => controller.savedContactsList,
+      LeftSidebarTab.chats => controller.activeChatPeers,
+      _ => controller.peers,
+    };
+
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.all(10),
+          child: Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: [
+              ChoiceChip(
+                label: const Text('Rete'),
+                selected: _activeTab == LeftSidebarTab.allPeers,
+                onSelected: (_) =>
+                    setState(() => _activeTab = LeftSidebarTab.allPeers),
+              ),
+              ChoiceChip(
+                label: Text('Contatti (${controller.savedContactsList.length})'),
+                selected: _activeTab == LeftSidebarTab.savedContacts,
+                onSelected: (_) =>
+                    setState(() => _activeTab = LeftSidebarTab.savedContacts),
+              ),
+              ChoiceChip(
+                label: Text('Chat (${controller.activeChatPeers.length})'),
+                selected: _activeTab == LeftSidebarTab.chats,
+                onSelected: (_) =>
+                    setState(() => _activeTab = LeftSidebarTab.chats),
+              ),
+              ChoiceChip(
+                label: Text('Cronologia (${controller.fileHistory.length})'),
+                selected: _activeTab == LeftSidebarTab.fileHistory,
+                onSelected: (_) =>
+                    setState(() => _activeTab = LeftSidebarTab.fileHistory),
+              ),
+            ],
+          ),
+        ),
+        const Divider(height: 1),
+        Expanded(
+          child: displayedPeers.isEmpty
+              ? Center(
+                  child: Padding(
+                    padding: const EdgeInsets.all(24.0),
+                    child: Text(
+                      _activeTab == LeftSidebarTab.savedContacts
+                          ? 'Nessun contatto salvato.\nClicca sulla stella accanto a un host per salvarlo e rendere la chat permanente.'
+                          : 'Nessun nodo rilevato.\nAssicurati di essere sulla stessa rete Wi-Fi o aggiungi un IP manualmente.',
+                      textAlign: TextAlign.center,
+                    ),
+                  ),
+                )
+              : ListView.builder(
+                  itemCount: displayedPeers.length,
+                  itemBuilder: (context, idx) {
+                    final peer = displayedPeers[idx];
+                    final isSelected =
+                        controller.selectedPeer?.nodeId == peer.nodeId;
+                    final lastMsg = controller.lastMessageForPeer(peer.nodeId);
+                    final unread = controller.unreadCountForPeer(peer.nodeId);
+
+                    return ListTile(
+                      selected: isSelected,
+                      leading: Stack(
+                        children: [
+                          CircleAvatar(
+                            child: Icon(
+                              peer.platform == PeerPlatform.windows
+                                  ? Icons.desktop_windows_rounded
+                                  : Icons.smartphone_rounded,
+                            ),
+                          ),
+                          Positioned(
+                            right: 0,
+                            bottom: 0,
+                            child: Container(
+                              width: 11,
+                              height: 11,
+                              decoration: BoxDecoration(
+                                color: peer.isOnline
+                                    ? Colors.greenAccent
+                                    : Colors.grey,
+                                shape: BoxShape.circle,
+                                border:
+                                    Border.all(color: Colors.black, width: 1.5),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                      title: Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              peer.alias,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                          if (unread > 0)
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 7,
+                                vertical: 2,
+                              ),
+                              decoration: BoxDecoration(
+                                color: Theme.of(context).colorScheme.primary,
+                                borderRadius: BorderRadius.circular(10),
+                              ),
+                              child: Text(
+                                '$unread',
+                                style: const TextStyle(
+                                  fontSize: 11,
+                                  color: Colors.white,
+                                ),
+                              ),
+                            ),
+                        ],
+                      ),
+                      subtitle: Text(
+                        lastMsg != null
+                            ? '${lastMsg.isOutgoing ? "Tu: " : ""}${lastMsg.content}'
+                            : '${peer.ipAddress} • ${peer.isOnline ? "Online" : "Offline (Chat salvata)"}',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      trailing: IconButton(
+                        tooltip: peer.isTrusted
+                            ? 'Rimuovi dai Contatti Fidati'
+                            : 'Salva come Contatto Fidato (Chat permanente)',
+                        icon: Icon(
+                          peer.isTrusted
+                              ? Icons.star_rounded
+                              : Icons.star_border_rounded,
+                          color: peer.isTrusted ? Colors.amber : null,
+                        ),
+                        onPressed: () => controller.toggleSaveContact(peer),
+                      ),
+                      onTap: () {
+                        if (_activeTab == LeftSidebarTab.fileHistory) {
+                          setState(() => _activeTab = LeftSidebarTab.chats);
+                        }
+                        controller.selectPeer(peer);
+                      },
+                    );
+                  },
+                ),
+        ),
+      ],
+    );
+  }
+
+  /// Vista della Cronologia dei File Mandati e Ricevuti
+  Widget _buildFileHistoryView(
+    BuildContext context,
+    P2PController controller,
+  ) {
+    final List<FileHistoryEntry> items = switch (_historyFilter) {
+      'sent' => controller.sentFileHistory,
+      'received' => controller.receivedFileHistory,
+      _ => controller.fileHistory,
+    };
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.all(14.0),
+          child: Row(
+            children: [
+              const Icon(Icons.history_edu_rounded),
+              const SizedBox(width: 8),
+              const Expanded(
+                child: Text(
+                  'Cronologia Trasferimenti File',
+                  style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold),
+                ),
+              ),
+              SegmentedButton<String>(
+                segments: [
+                  ButtonSegment(
+                    value: 'sent',
+                    label: Text('Inviati (${controller.sentFileHistory.length})'),
+                  ),
+                  ButtonSegment(
+                    value: 'received',
+                    label: Text(
+                      'Ricevuti (${controller.receivedFileHistory.length})',
+                    ),
+                  ),
+                  const ButtonSegment(value: 'all', label: Text('Tutti')),
+                ],
+                selected: {_historyFilter},
+                onSelectionChanged: (v) =>
+                    setState(() => _historyFilter = v.first),
+              ),
+              const SizedBox(width: 8),
+              if (controller.fileHistory.isNotEmpty)
+                IconButton(
+                  tooltip: 'Svuota cronologia',
+                  icon: const Icon(Icons.delete_sweep_outlined),
+                  onPressed: controller.clearFileHistory,
+                ),
+            ],
+          ),
+        ),
+        const Divider(height: 1),
+        Expanded(
+          child: items.isEmpty
+              ? const Center(
+                  child: Text('Nessun file presente in questa sezione.'),
+                )
+              : ListView.separated(
+                  padding: const EdgeInsets.all(12),
+                  itemCount: items.length,
+                  separatorBuilder: (_, __) => const SizedBox(height: 8),
+                  itemBuilder: (context, index) {
+                    final entry = items[index];
+                    final bool exists = entry.filePath != null &&
+                        File(entry.filePath!).existsSync();
+
+                    return Card(
+                      child: ListTile(
+                        leading: CircleAvatar(
+                          child: Icon(
+                            entry.isOutgoing
+                                ? Icons.upload_file_rounded
+                                : Icons.downloading_rounded,
+                          ),
+                        ),
+                        title: Text(
+                          entry.fileName,
+                          style: const TextStyle(fontWeight: FontWeight.w600),
+                        ),
+                        subtitle: Text(
+                          '${entry.isOutgoing ? "Inviato a" : "Ricevuto da"}: ${entry.peerAlias} (${entry.peerIp})\n'
+                          'Dimensione: ${_formatBytes(entry.fileSizeBytes)} • ${DateFormat("dd/MM/yyyy HH:mm").format(entry.timestamp)}',
+                        ),
+                        isThreeLine: true,
+                        trailing: exists
+                            ? FilledButton.tonalIcon(
+                                icon: const Icon(
+                                  Icons.visibility_rounded,
+                                  size: 18,
+                                ),
+                                label: const Text('Anteprima'),
+                                onPressed: () => _openFilePreview(
+                                  context,
+                                  fileName: entry.fileName,
+                                  filePath: entry.filePath,
+                                ),
+                              )
+                            : const Chip(label: Text('File spostato')),
+                        onTap: exists
+                            ? () => _openFilePreview(
+                                  context,
+                                  fileName: entry.fileName,
+                                  filePath: entry.filePath,
+                                )
+                            : null,
+                      ),
+                    );
+                  },
+                ),
+        ),
+      ],
+    );
+  }
+
+  /// Area Chat con supporto allo scorrimento tra chat e anteprima multimediale
+  Widget _buildChatArea(
+    BuildContext context,
+    P2PController controller, {
+    bool isMobile = false,
+  }) {
+    final PeerNode? peer = controller.selectedPeer;
+    if (peer == null) {
+      return const Center(
+        child: Text(
+          'Seleziona un nodo o un contatto salvato per chattare o inviare file.',
+        ),
+      );
+    }
+
+    final messages = controller.messagesForSelectedPeer;
+    final scrollController = _scrollControllerForPeer(peer.nodeId);
+
+    return GestureDetector(
+      // Permette di scorrere orizzontalmente tra le diverse chat su mobile/touch
+      onHorizontalDragEnd: (details) {
+        if (details.primaryVelocity == null) return;
+        if (details.primaryVelocity! < -400) {
+          controller.cycleActiveChat(1);
+        } else if (details.primaryVelocity! > 400) {
+          controller.cycleActiveChat(-1);
+        }
+      },
+      child: Column(
+        children: [
+          // Intestazione della Chat selezionata
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            decoration: BoxDecoration(
+              color: Theme.of(context).cardTheme.color,
+              border: Border(
+                bottom: BorderSide(
+                  color: Theme.of(context).dividerColor.withValues(alpha: 0.2),
+                ),
+              ),
+            ),
+            child: Row(
+              children: [
+                if (isMobile)
+                  IconButton(
+                    icon: const Icon(Icons.arrow_back_rounded),
+                    onPressed: () => controller.selectPeer(null),
+                  ),
+                Icon(
+                  peer.isOnline ? Icons.circle : Icons.circle_outlined,
+                  size: 12,
+                  color: peer.isOnline ? Colors.greenAccent : Colors.grey,
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        peer.alias,
+                        style: const TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: 15.5,
+                        ),
+                      ),
+                      Text(
+                        '${peer.ipAddress}:${peer.tcpPort} • ${peer.isTrusted ? "Contatto Fidato (Chat Permanente)" : "Host Temporaneo (Richiesta Obbligatoria)"}',
+                        style: const TextStyle(fontSize: 11.5),
+                      ),
+                    ],
+                  ),
+                ),
+                IconButton(
+                  tooltip: peer.isTrusted
+                      ? 'Contatto Fidato Salvato'
+                      : 'Salva come Contatto Fidato',
+                  icon: Icon(
+                    peer.isTrusted
+                        ? Icons.star_rounded
+                        : Icons.star_border_rounded,
+                    color: peer.isTrusted ? Colors.amber : null,
+                  ),
+                  onPressed: () => controller.toggleSaveContact(peer),
+                ),
+                FilledButton.icon(
+                  icon: const Icon(Icons.attach_file_rounded, size: 18),
+                  label: const Text('Invia File'),
+                  onPressed: controller.isTransferring
+                      ? null
+                      : () => controller.pickAndSendFile(targetOverride: peer),
+                ),
+              ],
+            ),
+          ),
+
+          // Lista Messaggi e File con Anteprima
+          Expanded(
+            child: messages.isEmpty
+                ? Center(
+                    child: Text(
+                      'Nessun messaggio con ${peer.alias}.\nInvia un testo o un file (anche di grandi dimensioni)!',
+                      textAlign: TextAlign.center,
+                    ),
+                  )
+                : ListView.builder(
+                    controller: scrollController,
+                    padding: const EdgeInsets.all(14),
+                    itemCount: messages.length,
+                    itemBuilder: (context, index) {
+                      final msg = messages[index];
+                      return _buildMessageBubble(context, controller, msg);
+                    },
+                  ),
+          ),
+
+          // Barra di input messaggio e allegato
+          Padding(
+            padding: const EdgeInsets.all(10.0),
+            child: Row(
+              children: [
+                IconButton.filledTonal(
+                  tooltip: 'Allega e invia file frammentato',
+                  icon: const Icon(Icons.add_rounded),
+                  onPressed: controller.isTransferring
+                      ? null
+                      : () => controller.pickAndSendFile(targetOverride: peer),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: TextField(
+                    controller: _msgController,
+                    decoration: const InputDecoration(
+                      hintText: 'Scrivi un messaggio...',
+                      isDense: true,
+                      contentPadding: EdgeInsets.symmetric(
+                        horizontal: 14,
+                        vertical: 12,
+                      ),
+                    ),
+                    onSubmitted: (val) => _submitText(controller),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                IconButton.filled(
+                  icon: const Icon(Icons.send_rounded),
+                  onPressed: () => _submitText(controller),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _submitText(P2PController controller) {
+    final text = _msgController.text.trim();
+    if (text.isEmpty) return;
+    _msgController.clear();
+    controller.sendText(text);
+  }
+
+  Widget _buildMessageBubble(
+    BuildContext context,
+    P2PController controller,
+    P2PChatMessage msg,
+  ) {
+    final bool isMe = msg.isOutgoing;
+    final bool isFile = msg.type == TransferPayloadType.binaryFile;
+    final bool hasLocalFile =
+        msg.filePath != null && File(msg.filePath!).existsSync();
+
+    return Align(
+      alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 420),
+        child: Card(
+          color: isMe
+              ? Theme.of(context).colorScheme.primaryContainer
+              : Theme.of(context).cardTheme.color,
+          margin: const EdgeInsets.symmetric(vertical: 5),
+          child: InkWell(
+            borderRadius:
+                BorderRadius.circular(controller.uiStyle.borderRadius),
+            onTap: isFile
+                ? () => _openFilePreview(
+                      context,
+                      fileName: msg.content,
+                      filePath: msg.filePath,
+                    )
+                : null,
+            child: Padding(
+              padding: const EdgeInsets.all(12.0),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  if (isFile) ...[
+                    // Se è un'immagine presente su disco, mostra subito la miniatura cliccabile
+                    if (_isImageFile(msg.content) && hasLocalFile)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 8.0),
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(8),
+                          child: Image.file(
+                            File(msg.filePath!),
+                            height: 180,
+                            width: double.infinity,
+                            fit: BoxFit.cover,
+                          ),
+                        ),
+                      ),
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          _isImageFile(msg.content)
+                              ? Icons.image_rounded
+                              : _isVideoFile(msg.content)
+                                  ? Icons.movie_creation_rounded
+                                  : _isAudioFile(msg.content)
+                                      ? Icons.audiotrack_rounded
+                                      : Icons.insert_drive_file_rounded,
+                        ),
+                        const SizedBox(width: 8),
+                        Flexible(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                msg.content,
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                              Text(
+                                '${_formatBytes(msg.fileSize ?? 0)} • Tocca per aprire l\'anteprima',
+                                style: const TextStyle(fontSize: 11.5),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ] else
+                    Text(msg.content, style: const TextStyle(fontSize: 14.5)),
+                  const SizedBox(height: 4),
+                  Text(
+                    DateFormat('HH:mm').format(msg.timestamp),
+                    style: TextStyle(
+                      fontSize: 10.5,
+                      color: Theme.of(context)
+                          .textTheme
+                          .bodySmall
+                          ?.color
+                          ?.withValues(alpha: 0.7),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _showConnectByIpDialog(
+    BuildContext context,
+    P2PController controller,
+  ) {
+    final ipCtrl = TextEditingController();
+    final aliasCtrl = TextEditingController();
+    bool saveAsTrusted = true;
+
+    showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          title: const Text('Connetti o Salva Host via IP'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: ipCtrl,
+                decoration: const InputDecoration(
+                  labelText: 'Indirizzo IP (es. 192.168.1.45)',
+                ),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: aliasCtrl,
+                decoration: const InputDecoration(
+                  labelText: 'Nome Contatto (opzionale)',
+                ),
+              ),
+              const SizedBox(height: 10),
+              CheckboxListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('Salva come Contatto Fidato'),
+                subtitle: const Text(
+                  'Chat permanente e ricezione file senza richiesta',
+                ),
+                value: saveAsTrusted,
+                onChanged: (v) =>
+                    setDialogState(() => saveAsTrusted = v ?? true),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Annulla'),
+            ),
+            FilledButton(
+              onPressed: () {
+                Navigator.pop(ctx);
+                controller.connectByIp(
+                  ipAddress: ipCtrl.text,
+                  customAlias: aliasCtrl.text,
+                  saveAsTrusted: saveAsTrusted,
+                );
+              },
+              child: const Text('Connetti'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _showSettingsAndThemesSheet(
+    BuildContext context,
+    P2PController controller,
+  ) {
+    final aliasCtrl = TextEditingController(text: controller.localAlias);
+    final clientIdCtrl =
+        TextEditingController(text: controller.googleDesktopClientId);
+    final clientSecretCtrl =
+        TextEditingController(text: controller.googleDesktopClientSecret);
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      builder: (ctx) => DraggableScrollableSheet(
+        expand: false,
+        initialChildSize: 0.78,
+        maxChildSize: 0.92,
+        builder: (_, scrollCtrl) => ListView(
+          controller: scrollCtrl,
+          padding: const EdgeInsets.all(20),
+          children: [
+            const Text(
+              'Personalizzazione, Temi e Account Google',
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 16),
+
+            // Sezione Temi Colore
+            const Text(
+              'Tema Colore',
+              style: TextStyle(fontWeight: FontWeight.w600),
+            ),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: AppThemePreset.values.map((preset) {
+                return ChoiceChip(
+                  avatar: CircleAvatar(backgroundColor: preset.darkSeed),
+                  label: Text(preset.label),
+                  selected: controller.themePreset == preset,
+                  onSelected: (_) => controller.setThemePreset(preset),
+                );
+              }).toList(),
+            ),
+            const SizedBox(height: 16),
+
+            // Sezione Stile UI
+            const Text(
+              'Stile Interfaccia e Bordi',
+              style: TextStyle(fontWeight: FontWeight.w600),
+            ),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: AppUiStyle.values.map((style) {
+                return ChoiceChip(
+                  label: Text(style.label),
+                  selected: controller.uiStyle == style,
+                  onSelected: (_) => controller.setUiStyle(style),
+                );
+              }).toList(),
+            ),
+            const Divider(height: 28),
+
+            SwitchListTile(
+              title: const Text('Modalità Scura (Dark Mode)'),
+              value: controller.isDarkMode,
+              onChanged: controller.toggleDarkMode,
+            ),
+            if (controller.isDarkMode)
+              SwitchListTile(
+                title: const Text('Nero Puro AMOLED'),
+                value: controller.useAmoledBlack,
+                onChanged: controller.toggleAmoledBlack,
+              ),
+            SwitchListTile(
+              title: const Text('Effetto Sonoro (SFX) su Richieste File'),
+              subtitle: const Text(
+                'Riproduce un suono quando un host non fidato chiede di inviare un file',
+              ),
+              value: controller.sfxEnabled,
+              onChanged: controller.toggleSfx,
+            ),
+            const Divider(height: 28),
+
+            // Vero Login Google OAuth 2.0 (Desktop PKCE + Android)
+            const Text(
+              'Account Google (OAuth 2.0 PKCE Desktop / Android)',
+              style: TextStyle(fontWeight: FontWeight.w600),
+            ),
+            const SizedBox(height: 8),
+            if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) ...[
+              TextField(
+                controller: clientIdCtrl,
+                decoration: const InputDecoration(
+                  labelText: 'Google OAuth Desktop Client ID',
+                  hintText: 'es. 123456-abc.apps.googleusercontent.com',
+                ),
+              ),
+              const SizedBox(height: 8),
+              TextField(
+                controller: clientSecretCtrl,
+                obscureText: true,
+                decoration: const InputDecoration(
+                  labelText: 'Google OAuth Client Secret ( per Desktop)',
+                ),
+              ),
+              const SizedBox(height: 8),
+              Align(
+                alignment: Alignment.centerRight,
+                child: TextButton.icon(
+                  icon: const Icon(Icons.save_outlined),
+                  label: const Text('Salva Credenziali OAuth'),
+                  onPressed: () {
+                    controller.saveGoogleOAuthCredentials(
+                      clientId: clientIdCtrl.text,
+                      clientSecret: clientSecretCtrl.text,
+                    );
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text('Credenziali OAuth salvate.'),
+                      ),
+                    );
+                  },
+                ),
+              ),
+            ],
+            if (controller.isGoogleSignedIn)
+              ListTile(
+                leading: const CircleAvatar(child: Icon(Icons.verified_user)),
+                title: Text(controller.googleDisplayName ?? 'Utente Google'),
+                subtitle: Text(controller.googleEmail ?? ''),
+                trailing: OutlinedButton(
+                  onPressed: controller.signOutGoogle,
+                  child: const Text('Disconnetti'),
+                ),
+              )
+            else
+              FilledButton.icon(
+                icon: controller.isAuthenticatingGoogle
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.login_rounded),
+                label: const Text('Accedi con Google (OAuth 2.0 Reale)'),
+                onPressed: controller.isAuthenticatingGoogle
+                    ? null
+                    : () async {
+                        await controller.saveGoogleOAuthCredentials(
+                          clientId: clientIdCtrl.text,
+                          clientSecret: clientSecretCtrl.text,
+                        );
+                        await controller.signInWithGoogle();
+                      },
+              ),
+            const Divider(height: 28),
+
+            // Modifica Alias Locale
+            Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: aliasCtrl,
+                    decoration: const InputDecoration(
+                      labelText: 'Il tuo Alias in Rete',
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                FilledButton(
+                  onPressed: () {
+                    controller.updateLocalAlias(aliasCtrl.text);
+                    Navigator.pop(ctx);
+                  },
+                  child: const Text('Aggiorna'),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Dialog modale di Anteprima per Foto, Video, Audio e File di Testo
+class _FilePreviewDialog extends StatefulWidget {
+  final String fileName;
+  final String filePath;
+  final bool isImage;
+  final bool isAudio;
+  final bool isVideo;
+  final bool isText;
+
+  const _FilePreviewDialog({
+    required this.fileName,
+    required this.filePath,
+    required this.isImage,
+    required this.isAudio,
+    required this.isVideo,
+    required this.isText,
+  });
+
+  @override
+  State<_FilePreviewDialog> createState() => _FilePreviewDialogState();
+}
+
+class _FilePreviewDialogState extends State<_FilePreviewDialog> {
+  AudioPlayer? _audioPlayer;
+  bool _isPlayingAudio = false;
+  Duration _audioDuration = Duration.zero;
+  Duration _audioPosition = Duration.zero;
+
+  VideoPlayerController? _videoController;
+  bool _videoInitialized = false;
+  String? _videoError;
+
+  String? _textContent;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.isAudio) {
+      _initAudio();
+    } else if (widget.isVideo) {
+      _initVideo();
+    } else if (widget.isText) {
+      _initText();
+    }
+  }
+
+  Future<void> _initAudio() async {
+    _audioPlayer = AudioPlayer();
+    _audioPlayer!.onDurationChanged.listen((d) {
+      if (mounted) setState(() => _audioDuration = d);
+    });
+    _audioPlayer!.onPositionChanged.listen((p) {
+      if (mounted) setState(() => _audioPosition = p);
+    });
+    _audioPlayer!.onPlayerComplete.listen((_) {
+      if (mounted) {
+        setState(() {
+          _isPlayingAudio = false;
+          _audioPosition = Duration.zero;
+        });
+      }
+    });
+    await _audioPlayer!.play(DeviceFileSource(widget.filePath));
+    if (mounted) setState(() => _isPlayingAudio = true);
+  }
+
+  Future<void> _initVideo() async {
+    try {
+      _videoController = VideoPlayerController.file(File(widget.filePath));
+      await _videoController!.initialize();
+      await _videoController!.play();
+      if (mounted) setState(() => _videoInitialized = true);
+    } catch (e) {
+      if (mounted) setState(() => _videoError = '$e');
+    }
+  }
+
+  Future<void> _initText() async {
+    try {
+      final content = await File(widget.filePath).readAsString();
+      if (mounted) {
+        setState(() {
+          _textContent = content.length > 20000
+              ? '${content.substring(0, 20000)}\n\n... [File troncato per anteprima]'
+              : content;
+        });
+      }
+    } catch (e) {
+      if (mounted) setState(() => _textContent = 'Impossibile leggere il testo: $e');
+    }
+  }
+
+  Future<void> _openWithSystemApp() async {
+    try {
+      if (Platform.isWindows) {
+        await Process.run('explorer.exe', ['/select,', widget.filePath]);
+      } else if (Platform.isLinux) {
+        await Process.run('xdg-open', [widget.filePath]);
+      } else if (Platform.isMacOS) {
+        await Process.run('open', [widget.filePath]);
+      }
+    } catch (_) {}
+  }
+
+  @override
+  void dispose() {
+    _audioPlayer?.dispose();
+    _videoController?.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Dialog(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 720, maxHeight: 620),
+        child: Padding(
+          padding: const EdgeInsets.all(16.0),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Row(
+                children: [
                   Expanded(
                     child: Text(
-                      controller.localAlias,
+                      widget.fileName,
                       style: const TextStyle(
-                        color: Colors.white,
-                        fontWeight: FontWeight.w800,
+                        fontWeight: FontWeight.bold,
                         fontSize: 16,
                       ),
                       overflow: TextOverflow.ellipsis,
                     ),
                   ),
-                  if (controller.isGoogleSignedIn)
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 8,
-                        vertical: 3,
-                      ),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFF38BDF8).withValues(alpha: 0.18),
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: const Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(
-                            Icons.verified_user_rounded,
-                            size: 12,
-                            color: Color(0xFF38BDF8),
-                          ),
-                          SizedBox(width: 4),
-                          Text(
-                            'Google',
-                            style: TextStyle(
-                              fontSize: 10,
-                              fontWeight: FontWeight.bold,
-                              color: Color(0xFF38BDF8),
-                            ),
-                          ),
-                        ],
-                      ),
+                  if (Platform.isWindows || Platform.isLinux || Platform.isMacOS)
+                    TextButton.icon(
+                      icon: const Icon(Icons.folder_open_rounded, size: 18),
+                      label: const Text('Mostra nella cartella'),
+                      onPressed: _openWithSystemApp,
                     ),
-                ],
-              ),
-              const SizedBox(height: 14),
-
-              // Box IP Wi-Fi in evidenza
-              Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 14,
-                  vertical: 10,
-                ),
-                decoration: BoxDecoration(
-                  color: const Color(0xFF090D16).withValues(alpha: 0.65),
-                  borderRadius: BorderRadius.circular(14),
-                  border: Border.all(
-                    color: Colors.white.withValues(alpha: 0.08),
-                  ),
-                ),
-                child: Row(
-                  children: [
-                    const Icon(
-                      Icons.router_rounded,
-                      color: Color(0xFF38BDF8),
-                      size: 20,
-                    ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const Text(
-                            'IL TUO INDIRIZZO IP WI-FI',
-                            style: TextStyle(
-                              fontSize: 9.5,
-                              fontWeight: FontWeight.w700,
-                              letterSpacing: 0.8,
-                              color: Color(0xFF94A3B8),
-                            ),
-                          ),
-                          const SizedBox(height: 2),
-                          SelectableText(
-                            hasIp
-                                ? '$ipDisplay : ${controller.tcpPort}'
-                                : ipDisplay,
-                            style: const TextStyle(
-                              fontSize: 15,
-                              fontWeight: FontWeight.w800,
-                              fontFamily: 'monospace',
-                              color: Color(0xFF38BDF8),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    if (hasIp)
-                      IconButton(
-                        tooltip: 'Copia Indirizzo IP',
-                        onPressed: () =>
-                            _copyIpToClipboard(context, controller.localIp!),
-                        icon: const Icon(
-                          Icons.copy_rounded,
-                          size: 18,
-                          color: Colors.white70,
-                        ),
-                      ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 14),
-
-              // Pulsanti Azione: Connetti via IP + Scansione Wi-Fi
-              Row(
-                children: [
-                  Expanded(
-                    flex: 3,
-                    child: FilledButton.icon(
-                      style: FilledButton.styleFrom(
-                        backgroundColor: const Color(0xFF0284C7),
-                        foregroundColor: Colors.white,
-                        padding: const EdgeInsets.symmetric(vertical: 12),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                      ),
-                      onPressed: () =>
-                          _showConnectByIpDialog(context, controller),
-                      icon: const Icon(Icons.add_link_rounded, size: 18),
-                      label: const Text(
-                        'Connetti via IP',
-                        style: TextStyle(fontWeight: FontWeight.w700),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    flex: 2,
-                    child: OutlinedButton.icon(
-                      style: OutlinedButton.styleFrom(
-                        foregroundColor: Colors.white,
-                        side: BorderSide(
-                          color: Colors.white.withValues(alpha: 0.2),
-                        ),
-                        padding: const EdgeInsets.symmetric(vertical: 12),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                      ),
-                      onPressed: controller.isScanningWifi
-                          ? null
-                          : controller.refreshNetwork,
-                      icon: controller.isScanningWifi
-                          ? const SizedBox(
-                              width: 14,
-                              height: 14,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            )
-                          : const Icon(Icons.radar_rounded, size: 18),
-                      label: Text(
-                        controller.isScanningWifi ? 'Scan...' : 'Scansiona',
-                      ),
-                    ),
+                  IconButton(
+                    icon: const Icon(Icons.close_rounded),
+                    onPressed: () => Navigator.pop(context),
                   ),
                 ],
               ),
+              const Divider(),
+              Flexible(child: _buildPreviewBody()),
             ],
           ),
         ),
-
-        // Banner notifiche di rete / errori
-        if (controller.errorBanner != null)
-          Container(
-            margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-            decoration: BoxDecoration(
-              color: (controller.isBannerError
-                      ? Colors.redAccent
-                      : const Color(0xFF38BDF8))
-                  .withValues(alpha: 0.15),
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(
-                color: (controller.isBannerError
-                        ? Colors.redAccent
-                        : const Color(0xFF38BDF8))
-                    .withValues(alpha: 0.4),
-              ),
-            ),
-            child: Row(
-              children: [
-                Icon(
-                  controller.isBannerError
-                      ? Icons.warning_amber_rounded
-                      : Icons.check_circle_outline_rounded,
-                  color: controller.isBannerError
-                      ? Colors.redAccent
-                      : const Color(0xFF38BDF8),
-                  size: 18,
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Text(
-                    controller.errorBanner!,
-                    style: const TextStyle(fontSize: 12),
-                  ),
-                ),
-                IconButton(
-                  icon: const Icon(Icons.close, size: 16),
-                  onPressed: controller.clearError,
-                ),
-              ],
-            ),
-          ),
-
-        Padding(
-          padding: const EdgeInsets.fromLTRB(20, 10, 20, 6),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Text(
-                'DISPOSITIVI SULLA RETE (${controller.peers.length})',
-                style: const TextStyle(
-                  fontSize: 11,
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: 0.7,
-                  color: Color(0xFF94A3B8),
-                ),
-              ),
-              if (controller.isScanningWifi)
-                const Text(
-                  'Ricerca su sottorete Wi-Fi...',
-                  style: TextStyle(fontSize: 11, color: Color(0xFF38BDF8)),
-                ),
-            ],
-          ),
-        ),
-
-        // Lista Nodi con pulsanti rapidi "Chat" e "Invia File"
-        Expanded(
-          child: controller.peers.isEmpty
-              ? Center(
-                  child: SingleChildScrollView(
-                    padding: const EdgeInsets.all(28),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Container(
-                          padding: const EdgeInsets.all(20),
-                          decoration: BoxDecoration(
-                            shape: BoxShape.circle,
-                            color: const Color(0xFF38BDF8)
-                                .withValues(alpha: 0.1),
-                          ),
-                          child: const Icon(
-                            Icons.wifi_find_rounded,
-                            size: 44,
-                            color: Color(0xFF38BDF8),
-                          ),
-                        ),
-                        const SizedBox(height: 16),
-                        const Text(
-                          'Nessun dispositivo rilevato al momento',
-                          style: TextStyle(
-                            fontWeight: FontWeight.w700,
-                            fontSize: 16,
-                          ),
-                          textAlign: TextAlign.center,
-                        ),
-                        const SizedBox(height: 8),
-                        const Text(
-                          'Assicurati che entrambi i dispositivi siano sulla stessa rete Wi-Fi (o Hotspot) oppure premi "Connetti via IP" per collegarli all\'istante.',
-                          textAlign: TextAlign.center,
-                          style: TextStyle(
-                            color: Color(0xFF94A3B8),
-                            fontSize: 13,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                )
-              : ListView.separated(
-                  padding: const EdgeInsets.fromLTRB(16, 4, 16, 20),
-                  itemCount: controller.peers.length,
-                  separatorBuilder: (_, __) => const SizedBox(height: 10),
-                  itemBuilder: (context, index) {
-                    final PeerNode peer = controller.peers[index];
-                    final bool isSelected =
-                        controller.selectedPeer?.nodeId == peer.nodeId;
-
-                    return Container(
-                      decoration: BoxDecoration(
-                        color: isSelected
-                            ? const Color(0xFF0284C7).withValues(alpha: 0.16)
-                            : const Color(0xFF1E293B).withValues(alpha: 0.55),
-                        borderRadius: BorderRadius.circular(16),
-                        border: Border.all(
-                          color: isSelected
-                              ? const Color(0xFF38BDF8)
-                              : Colors.white.withValues(alpha: 0.07),
-                          width: isSelected ? 1.5 : 1.0,
-                        ),
-                      ),
-                      child: Padding(
-                        padding: const EdgeInsets.all(14),
-                        child: Column(
-                          children: [
-                            Row(
-                              children: [
-                                Container(
-                                  width: 44,
-                                  height: 44,
-                                  decoration: BoxDecoration(
-                                    color: const Color(0xFF38BDF8)
-                                        .withValues(alpha: 0.15),
-                                    borderRadius: BorderRadius.circular(12),
-                                  ),
-                                  child: Icon(
-                                    peer.platform == PeerPlatform.windows
-                                        ? Icons.desktop_windows_rounded
-                                        : peer.platform == PeerPlatform.android
-                                            ? Icons.phone_android_rounded
-                                            : Icons.devices_other_rounded,
-                                    color: const Color(0xFF38BDF8),
-                                  ),
-                                ),
-                                const SizedBox(width: 12),
-                                Expanded(
-                                  child: Column(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    children: [
-                                      Text(
-                                        peer.alias,
-                                        style: const TextStyle(
-                                          fontWeight: FontWeight.w700,
-                                          fontSize: 15,
-                                        ),
-                                        overflow: TextOverflow.ellipsis,
-                                      ),
-                                      const SizedBox(height: 3),
-                                      Text(
-                                        '${peer.ipAddress}:${peer.tcpPort}',
-                                        style: const TextStyle(
-                                          color: Color(0xFF94A3B8),
-                                          fontSize: 12,
-                                          fontFamily: 'monospace',
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                                Container(
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 9,
-                                    vertical: 4,
-                                  ),
-                                  decoration: BoxDecoration(
-                                    color: Colors.greenAccent
-                                        .withValues(alpha: 0.15),
-                                    borderRadius: BorderRadius.circular(20),
-                                  ),
-                                  child: const Text(
-                                    'Attivo',
-                                    style: TextStyle(
-                                      fontSize: 10.5,
-                                      fontWeight: FontWeight.w700,
-                                      color: Colors.greenAccent,
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            ),
-                            const SizedBox(height: 12),
-                            // Azioni rapide sulla card: Apri Chat oppure Invia File diretto!
-                            Row(
-                              children: [
-                                Expanded(
-                                  child: OutlinedButton.icon(
-                                    style: OutlinedButton.styleFrom(
-                                      visualDensity: VisualDensity.compact,
-                                      shape: RoundedRectangleBorder(
-                                        borderRadius: BorderRadius.circular(10),
-                                      ),
-                                    ),
-                                    onPressed: () {
-                                      controller.selectPeer(peer);
-                                      if (!isDesktop) {
-                                        setState(() => _activeTabIndex = 1);
-                                      }
-                                    },
-                                    icon: const Icon(
-                                      Icons.chat_bubble_outline_rounded,
-                                      size: 16,
-                                    ),
-                                    label: const Text('Apri Chat'),
-                                  ),
-                                ),
-                                const SizedBox(width: 8),
-                                Expanded(
-                                  child: FilledButton.tonalIcon(
-                                    style: FilledButton.styleFrom(
-                                      visualDensity: VisualDensity.compact,
-                                      shape: RoundedRectangleBorder(
-                                        borderRadius: BorderRadius.circular(10),
-                                      ),
-                                    ),
-                                    onPressed: controller.isTransferring
-                                        ? null
-                                        : () async {
-                                            controller.selectPeer(peer);
-                                            if (!isDesktop) {
-                                              setState(
-                                                  () => _activeTabIndex = 1);
-                                            }
-                                            await controller.pickAndSendFile(
-                                              targetOverride: peer,
-                                            );
-                                          },
-                                    icon: const Icon(
-                                      Icons.upload_file_rounded,
-                                      size: 16,
-                                    ),
-                                    label: const Text('Invia File'),
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ],
-                        ),
-                      ),
-                    );
-                  },
-                ),
-        ),
-      ],
+      ),
     );
   }
 
-  Widget _buildConversationWorkspace(
-    BuildContext context,
-    P2PController controller, {
-    required bool isDesktop,
-  }) {
-    final PeerNode? activePeer = controller.selectedPeer;
-    if (activePeer == null) {
-      return Center(
-        child: Padding(
-          padding: const EdgeInsets.all(32),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Container(
-                padding: const EdgeInsets.all(22),
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: const Color(0xFF38BDF8).withValues(alpha: 0.1),
-                ),
-                child: const Icon(
-                  Icons.swap_horiz_rounded,
-                  size: 48,
-                  color: Color(0xFF38BDF8),
-                ),
+  Widget _buildPreviewBody() {
+    if (widget.isImage) {
+      return InteractiveViewer(
+        minScale: 0.5,
+        maxScale: 5.0,
+        child: Image.file(File(widget.filePath), fit: BoxFit.contain),
+      );
+    }
+
+    if (widget.isAudio) {
+      final double maxSec =
+          _audioDuration.inMilliseconds.toDouble().clamp(1.0, double.infinity);
+      final double curSec =
+          _audioPosition.inMilliseconds.toDouble().clamp(0.0, maxSec);
+
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 28, horizontal: 16),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.music_note_rounded, size: 64),
+            const SizedBox(height: 16),
+            Slider(
+              value: curSec,
+              max: maxSec,
+              onChanged: (val) {
+                _audioPlayer?.seek(Duration(milliseconds: val.toInt()));
+              },
+            ),
+            Text(
+              '${_audioPosition.inMinutes}:${(_audioPosition.inSeconds % 60).toString().padLeft(2, "0")} / '
+              '${_audioDuration.inMinutes}:${(_audioDuration.inSeconds % 60).toString().padLeft(2, "0")}',
+            ),
+            const SizedBox(height: 12),
+            IconButton.filled(
+              iconSize: 36,
+              icon: Icon(
+                _isPlayingAudio
+                    ? Icons.pause_rounded
+                    : Icons.play_arrow_rounded,
               ),
-              const SizedBox(height: 16),
-              const Text(
-                'Seleziona un dispositivo per iniziare',
-                style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
-              ),
-              const SizedBox(height: 8),
-              const Text(
-                'Scegli un nodo dalla lista Wi-Fi o connettiti direttamente tramite indirizzo IP per inviare file e messaggi ad alta velocità.',
-                textAlign: TextAlign.center,
-                style: TextStyle(color: Color(0xFF94A3B8), fontSize: 13.5),
-              ),
-              const SizedBox(height: 20),
-              FilledButton.icon(
-                onPressed: () => _showConnectByIpDialog(context, controller),
-                icon: const Icon(Icons.add_link_rounded),
-                label: const Text('Connetti tramite IP'),
-              ),
-            ],
-          ),
+              onPressed: () async {
+                if (_isPlayingAudio) {
+                  await _audioPlayer?.pause();
+                  setState(() => _isPlayingAudio = false);
+                } else {
+                  await _audioPlayer?.resume();
+                  setState(() => _isPlayingAudio = true);
+                }
+              },
+            ),
+          ],
         ),
       );
     }
 
-    final List<P2PChatMessage> messages = controller.messagesForSelectedPeer;
-    final DateFormat timeFormatter = DateFormat('HH:mm');
-
-    return Column(
-      children: [
-        // Header della Chat con pulsante Back su Mobile e Invia File
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-          decoration: const BoxDecoration(
-            border: Border(bottom: BorderSide(color: Color(0xFF1E293B))),
-          ),
-          child: Row(
-            children: [
-              if (!isDesktop)
-                IconButton(
-                  tooltip: 'Torna ai dispositivi',
-                  onPressed: () => setState(() => _activeTabIndex = 0),
-                  icon: const Icon(Icons.arrow_back_rounded),
-                ),
-              CircleAvatar(
-                backgroundColor:
-                    const Color(0xFF38BDF8).withValues(alpha: 0.15),
-                child: Icon(
-                  activePeer.platform == PeerPlatform.windows
-                      ? Icons.desktop_windows_rounded
-                      : Icons.phone_android_rounded,
-                  color: const Color(0xFF38BDF8),
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      activePeer.alias,
-                      style: const TextStyle(
-                        fontSize: 15.5,
-                        fontWeight: FontWeight.w800,
-                      ),
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                    Text(
-                      '${activePeer.ipAddress}:${activePeer.tcpPort}',
-                      style: const TextStyle(
-                        color: Color(0xFF94A3B8),
-                        fontSize: 12,
-                        fontFamily: 'monospace',
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              FilledButton.icon(
-                onPressed: controller.isTransferring
-                    ? null
-                    : () => controller.pickAndSendFile(),
-                icon: const Icon(Icons.upload_file_rounded, size: 18),
-                label: const Text('Invia File'),
-              ),
-            ],
-          ),
-        ),
-
-        // Barra di avanzamento trasferimento file
-        if (controller.isTransferring)
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-            color: const Color(0xFF1E293B),
-            child: Column(
-              children: [
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    const Text(
-                      'Trasferimento file su Wi-Fi in corso...',
-                      style: TextStyle(fontSize: 12, color: Color(0xFF38BDF8)),
-                    ),
-                    Text(
-                      '${(controller.activeTransferProgress * 100).toStringAsFixed(0)}%',
-                      style: const TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.bold,
-                        color: Color(0xFF38BDF8),
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 6),
-                LinearProgressIndicator(
-                  value: controller.activeTransferProgress,
-                  minHeight: 6,
-                  borderRadius: BorderRadius.circular(6),
-                  backgroundColor: const Color(0xFF0F172A),
-                  color: const Color(0xFF38BDF8),
-                ),
-              ],
+    if (widget.isVideo) {
+      if (_videoError != null) {
+        return Center(
+          child: Text('Codec video gestito dal sistema:\n$_videoError'),
+        );
+      }
+      if (!_videoInitialized || _videoController == null) {
+        return const Center(child: CircularProgressIndicator());
+      }
+      return Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Flexible(
+            child: AspectRatio(
+              aspectRatio: _videoController!.value.aspectRatio,
+              child: VideoPlayer(_videoController!),
             ),
           ),
-
-        // Messaggi e File scambiati
-        Expanded(
-          child: messages.isEmpty
-              ? Center(
-                  child: Padding(
-                    padding: const EdgeInsets.all(24),
-                    child: Text(
-                      'Connesso a ${activePeer.alias} (${activePeer.ipAddress}).\nScrivi un messaggio o premi "Invia File" per iniziare.',
-                      textAlign: TextAlign.center,
-                      style: const TextStyle(color: Color(0xFF64748B)),
-                    ),
-                  ),
-                )
-              : ListView.builder(
-                  controller: _chatScrollController,
-                  padding: const EdgeInsets.all(20),
-                  itemCount: messages.length,
-                  itemBuilder: (context, index) {
-                    final P2PChatMessage msg = messages[index];
-                    final bool isFile =
-                        msg.type == TransferPayloadType.binaryFile;
-
-                    return Align(
-                      alignment: msg.isOutgoing
-                          ? Alignment.centerRight
-                          : Alignment.centerLeft,
-                      child: Container(
-                        margin: const EdgeInsets.only(bottom: 12),
-                        padding: const EdgeInsets.all(14),
-                        constraints: const BoxConstraints(maxWidth: 440),
-                        decoration: BoxDecoration(
-                          gradient: msg.isOutgoing
-                              ? const LinearGradient(
-                                  colors: [
-                                    Color(0xFF0284C7),
-                                    Color(0xFF2563EB),
-                                  ],
-                                  begin: Alignment.topLeft,
-                                  end: Alignment.bottomRight,
-                                )
-                              : null,
-                          color: msg.isOutgoing
-                              ? null
-                              : const Color(0xFF1E293B),
-                          borderRadius: BorderRadius.only(
-                            topLeft: const Radius.circular(18),
-                            topRight: const Radius.circular(18),
-                            bottomLeft:
-                                Radius.circular(msg.isOutgoing ? 18 : 4),
-                            bottomRight:
-                                Radius.circular(msg.isOutgoing ? 4 : 18),
-                          ),
-                        ),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            if (isFile)
-                              Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Container(
-                                    padding: const EdgeInsets.all(10),
-                                    decoration: BoxDecoration(
-                                      color:
-                                          Colors.white.withValues(alpha: 0.16),
-                                      borderRadius: BorderRadius.circular(12),
-                                    ),
-                                    child: const Icon(
-                                      Icons.insert_drive_file_rounded,
-                                      color: Colors.white,
-                                      size: 24,
-                                    ),
-                                  ),
-                                  const SizedBox(width: 12),
-                                  Flexible(
-                                    child: Column(
-                                      crossAxisAlignment:
-                                          CrossAxisAlignment.start,
-                                      children: [
-                                        Text(
-                                          msg.content,
-                                          style: const TextStyle(
-                                            color: Colors.white,
-                                            fontWeight: FontWeight.w700,
-                                          ),
-                                        ),
-                                        if (msg.fileSize != null)
-                                          Text(
-                                            _formatBytes(msg.fileSize!),
-                                            style: const TextStyle(
-                                              color: Colors.white70,
-                                              fontSize: 11.5,
-                                            ),
-                                          ),
-                                        if (msg.filePath != null)
-                                          Padding(
-                                            padding:
-                                                const EdgeInsets.only(top: 3),
-                                            child: Text(
-                                              msg.isOutgoing
-                                                  ? 'Inviato con successo'
-                                                  : 'Salvato in: ${msg.filePath}',
-                                              style: const TextStyle(
-                                                color: Colors.white70,
-                                                fontSize: 10,
-                                              ),
-                                            ),
-                                          ),
-                                      ],
-                                    ),
-                                  ),
-                                ],
-                              )
-                            else
-                              SelectableText(
-                                msg.content,
-                                style: const TextStyle(
-                                  color: Colors.white,
-                                  fontSize: 14.5,
-                                ),
-                              ),
-                            const SizedBox(height: 6),
-                            Text(
-                              timeFormatter.format(msg.timestamp),
-                              style: const TextStyle(
-                                color: Colors.white60,
-                                fontSize: 10,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    );
-                  },
-                ),
-        ),
-
-        // Barra di inserimento testo e allegato file
-        Container(
-          padding: const EdgeInsets.fromLTRB(14, 10, 14, 14),
-          decoration: const BoxDecoration(
-            border: Border(top: BorderSide(color: Color(0xFF1E293B))),
+          VideoProgressIndicator(_videoController!, allowScrubbing: true),
+          const SizedBox(height: 8),
+          IconButton.filled(
+            icon: Icon(
+              _videoController!.value.isPlaying
+                  ? Icons.pause_rounded
+                  : Icons.play_arrow_rounded,
+            ),
+            onPressed: () {
+              setState(() {
+                _videoController!.value.isPlaying
+                    ? _videoController!.pause()
+                    : _videoController!.play();
+              });
+            },
           ),
-          child: Row(
-            children: [
-              IconButton.filledTonal(
-                tooltip: 'Scegli e invia un file',
-                onPressed: controller.isTransferring
-                    ? null
-                    : () => controller.pickAndSendFile(),
-                icon: const Icon(Icons.attach_file_rounded),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: TextField(
-                  controller: _textController,
-                  decoration: InputDecoration(
-                    hintText: 'Scrivi un messaggio a ${activePeer.alias}...',
-                    filled: true,
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(24),
-                      borderSide: BorderSide.none,
-                    ),
-                    contentPadding: const EdgeInsets.symmetric(
-                      horizontal: 18,
-                      vertical: 12,
-                    ),
-                  ),
-                  onSubmitted: (value) {
-                    controller.sendText(value);
-                    _textController.clear();
-                  },
-                ),
-              ),
-              const SizedBox(width: 10),
-              FilledButton.icon(
-                onPressed: () {
-                  controller.sendText(_textController.text);
-                  _textController.clear();
-                },
-                icon: const Icon(Icons.send_rounded, size: 18),
-                label: const Text('Invia'),
-              ),
-            ],
-          ),
+        ],
+      );
+    }
+
+    if (widget.isText) {
+      return SingleChildScrollView(
+        padding: const EdgeInsets.all(12),
+        child: SelectableText(
+          _textContent ?? 'Caricamento...',
+          style: const TextStyle(fontFamily: 'monospace', fontSize: 13),
         ),
-      ],
+      );
+    }
+
+    return Padding(
+      padding: const EdgeInsets.all(24.0),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.insert_drive_file_outlined, size: 56),
+          const SizedBox(height: 12),
+          Text('Percorso salvataggio:\n${widget.filePath}',
+              textAlign: TextAlign.center),
+        ],
+      ),
     );
-  }
-
-  Widget _buildSettingsView(BuildContext context, P2PController controller) {
-    return ListView(
-      padding: const EdgeInsets.all(24),
-      children: [
-        const Text(
-          'Impostazioni & Profilo',
-          style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800),
-        ),
-        const SizedBox(height: 6),
-        const Text(
-          'Configura il tuo account Google, il nome del dispositivo e la diagnostica Wi-Fi.',
-          style: TextStyle(color: Color(0xFF94A3B8)),
-        ),
-        const SizedBox(height: 24),
-
-        // SEZIONE 1: Account Google (via Browser su PC / Nativo su Android)
-        Card(
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(18),
-          ),
-          child: Padding(
-            padding: const EdgeInsets.all(20),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Row(
-                  children: [
-                    Icon(
-                      Icons.account_circle_outlined,
-                      color: Color(0xFF38BDF8),
-                    ),
-                    SizedBox(width: 10),
-                    Text(
-                      'Account Google',
-                      style: TextStyle(
-                        fontSize: 17,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 14),
-                if (controller.isGoogleSignedIn)
-                  ListTile(
-                    contentPadding: EdgeInsets.zero,
-                    leading: CircleAvatar(
-                      backgroundColor: const Color(0xFF0284C7),
-                      child: Text(
-                        (controller.googleDisplayName ?? 'G')[0].toUpperCase(),
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                    ),
-                    title: Text(
-                      controller.googleDisplayName ?? 'Utente Google',
-                      style: const TextStyle(fontWeight: FontWeight.bold),
-                    ),
-                    subtitle: Text(controller.googleEmail ?? ''),
-                    trailing: OutlinedButton.icon(
-                      onPressed: controller.signOutGoogle,
-                      icon: const Icon(Icons.logout_rounded, size: 16),
-                      label: const Text('Esci'),
-                    ),
-                  )
-                else
-                  Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Text(
-                        'Autenticati tramite il browser di sistema (su PC) o tramite Google Play Services (su Android) per sincronizzare il tuo profilo sulla rete locale.',
-                        style: TextStyle(
-                          color: Color(0xFF94A3B8),
-                          fontSize: 13,
-                        ),
-                      ),
-                      const SizedBox(height: 14),
-                      FilledButton.icon(
-                        onPressed: controller.isAuthenticatingGoogle
-                            ? null
-                            : controller.signInWithGoogle,
-                        icon: controller.isAuthenticatingGoogle
-                            ? const SizedBox(
-                                width: 16,
-                                height: 16,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                ),
-                              )
-                            : const Icon(Icons.open_in_browser_rounded),
-                        label: Text(
-                          controller.isAuthenticatingGoogle
-                              ? 'In attesa di conferma nel browser...'
-                              : 'Accedi con Google (Browser / App)',
-                        ),
-                      ),
-                    ],
-                  ),
-              ],
-            ),
-          ),
-        ),
-        const SizedBox(height: 16),
-
-        // SEZIONE 2: Stato Rete & Indirizzo IP
-        Card(
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(18),
-          ),
-          child: Padding(
-            padding: const EdgeInsets.all(20),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Row(
-                  children: [
-                    Icon(
-                      Icons.settings_ethernet_rounded,
-                      color: Color(0xFF38BDF8),
-                    ),
-                    SizedBox(width: 10),
-                    Text(
-                      'Indirizzo IP Wi-Fi & Nome Dispositivo',
-                      style: TextStyle(
-                        fontSize: 17,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 12),
-                ListTile(
-                  contentPadding: EdgeInsets.zero,
-                  title: const Text('Indirizzo IPv4 Wi-Fi Attivo'),
-                  subtitle: Text(
-                    controller.localIp != null
-                        ? '${controller.localIp}:${controller.tcpPort}'
-                        : 'Nessun IP rilevato',
-                    style: const TextStyle(
-                      fontFamily: 'monospace',
-                      fontSize: 15,
-                      color: Color(0xFF38BDF8),
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                  trailing: IconButton(
-                    tooltip: 'Copia IP',
-                    onPressed: controller.localIp == null
-                        ? null
-                        : () =>
-                            _copyIpToClipboard(context, controller.localIp!),
-                    icon: const Icon(Icons.copy_rounded),
-                  ),
-                ),
-                if (controller.allLocalIps.isNotEmpty)
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 12),
-                    child: Text(
-                      'Interfacce attive: ${controller.allLocalIps.join(", ")}',
-                      style: const TextStyle(
-                        fontSize: 12,
-                        color: Color(0xFF94A3B8),
-                        fontFamily: 'monospace',
-                      ),
-                    ),
-                  ),
-                const Divider(),
-                const SizedBox(height: 8),
-                Row(
-                  children: [
-                    Expanded(
-                      child: TextField(
-                        controller: _aliasController,
-                        decoration: InputDecoration(
-                          labelText: 'Nome visibile sulla rete (Alias)',
-                          border: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          isDense: true,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    FilledButton(
-                      onPressed: () {
-                        controller.updateLocalAlias(_aliasController.text);
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(
-                            content: Text('Nome dispositivo aggiornato!'),
-                          ),
-                        );
-                      },
-                      child: const Text('Salva'),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-        ),
-        const SizedBox(height: 16),
-
-        // SEZIONE 3: Tema & Opzioni File
-        Card(
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(18),
-          ),
-          child: Column(
-            children: [
-              SwitchListTile(
-                title: const Text('Tema Scuro (Dark Mode)'),
-                subtitle: const Text('Interfaccia scura moderna'),
-                value: controller.isDarkMode,
-                onChanged: controller.toggleDarkMode,
-              ),
-              if (controller.isDarkMode)
-                SwitchListTile(
-                  title: const Text('Modalità Nero Puro AMOLED (S25 Ultra)'),
-                  subtitle: const Text(
-                    'Sfondo #000000 per display Dynamic AMOLED 2X',
-                  ),
-                  value: controller.useAmoledBlack,
-                  onChanged: controller.toggleAmoledBlack,
-                ),
-              SwitchListTile(
-                title: const Text('Salvataggio automatico in Download'),
-                subtitle: const Text(
-                  'Salva subito i file ricevuti nella cartella Download del PC o del telefono',
-                ),
-                value: controller.autoAcceptFiles,
-                onChanged: controller.toggleAutoAcceptFiles,
-              ),
-            ],
-          ),
-        ),
-      ],
-    );
-  }
-
-  String _formatBytes(int bytes) {
-    if (bytes < 1024) return '$bytes B';
-    if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
-    return '${(bytes / (1024 * 1024)).toStringAsFixed(2)} MB';
   }
 }
