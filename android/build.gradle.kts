@@ -19,6 +19,14 @@ subprojects {
     project.evaluationDependsOn(":app")
 }
 
+// Forza compileSdk a 36 per tutti i plugin esterni (es. bonsoir_android)
+subprojects {
+    afterEvaluate {
+        val android = project.extensions.findByName("android") as? com.android.build.gradle.BaseExtension
+        android?.compileSdkVersion(36)
+    }
+}
+
 tasks.register<Delete>("clean") {
     delete(rootProject.layout.buildDirectory)
 }
