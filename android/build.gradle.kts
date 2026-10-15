@@ -19,9 +19,13 @@ subprojects {
     project.evaluationDependsOn(":app")
 }
 
-// Forza compileSdk a 36 per tutti i plugin esterni (es. bonsoir_android)
+// Configura compileSdk 36 direttamente all'aggancio dei plugin Android, evitando afterEvaluate
 subprojects {
-    afterEvaluate {
+    plugins.withId("com.android.library") {
+        val android = project.extensions.findByName("android") as? com.android.build.gradle.BaseExtension
+        android?.compileSdkVersion(36)
+    }
+    plugins.withId("com.android.application") {
         val android = project.extensions.findByName("android") as? com.android.build.gradle.BaseExtension
         android?.compileSdkVersion(36)
     }
