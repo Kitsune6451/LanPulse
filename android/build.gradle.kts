@@ -15,20 +15,18 @@ subprojects {
     val newSubprojectBuildDir: Directory = newBuildDir.dir(project.name)
     project.layout.buildDirectory.value(newSubprojectBuildDir)
 }
+
+// 1. Registra l'override PRIMA che i subproject vengano valutati
 subprojects {
-    project.evaluationDependsOn(":app")
+    afterEvaluate {
+        val android = project.extensions.findByName("android") as? com.android.build.gradle.BaseExtension
+        android?.compileSdkVersion(36)
+    }
 }
 
-// Configura compileSdk 36 direttamente all'aggancio dei plugin Android, evitando afterEvaluate
+// 2. Forza la valutazione di :app (ora l'afterEvaluate sopra verrà eseguito al momento giusto)
 subprojects {
-    plugins.withId("com.android.library") {
-        val android = project.extensions.findByName("android") as? com.android.build.gradle.BaseExtension
-        android?.compileSdkVersion(36)
-    }
-    plugins.withId("com.android.application") {
-        val android = project.extensions.findByName("android") as? com.android.build.gradle.BaseExtension
-        android?.compileSdkVersion(36)
-    }
+    project.evaluationDependsOn(":app")
 }
 
 tasks.register<Delete>("clean") {
