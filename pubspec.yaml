@@ -1,0 +1,35 @@
+name: lanpulse_p2p
+description: Applicazione P2P locale (Wi-Fi LAN) di File Sharing e Messaggistica per Android e Windows (.exe) senza server esterni.
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.4.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  # Gestione dello stato reattiva e leggera
+  provider: ^6.1.2
+  # Informazioni di rete locale (IP Wi-Fi, Subnet, Broadcast address)
+  network_info_plus: ^6.0.1
+  # Discovery mDNS / Bonjour / NSD multipiattaforma
+  bonsoir: ^5.1.10
+  # Selezione file nativa su Android e Windows Explorer
+  file_picker: ^8.1.2
+  # Accesso alle cartelle Download/Documenti su Android e Windows
+  path_provider: ^2.1.4
+  # Permessi runtime su Android 13/14+ (NEARBY_WIFI_DEVICES)
+  permission_handler: ^11.3.1
+  # Identificatori univoci e crittografia hash SHA-256 per integrità file
+  uuid: ^4.5.0
+  crypto: ^3.0.5
+  intl: ^0.19.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true

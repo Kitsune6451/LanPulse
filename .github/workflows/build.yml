@@ -1,0 +1,91 @@
+name: Build LanPulse P2P (Android APK & Windows EXE)
+
+on:
+  push:
+    branches: [ "main", "master", "develop" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  # ============================================================================
+  # JOB 1: Compilazione Release Android (.apk)
+  # ============================================================================
+  build-android:
+    name: Build Android Release APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout del repository
+        uses: actions/checkout@v4
+
+      - name: Configura JDK 17 per Gradle
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Configura ambiente Flutter (Stable)
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          cache: true
+
+      - name: Verifica dipendenze e analisi statica
+        run: |
+          flutter pub get
+          flutter analyze --no-fatal-infos
+
+      - name: Compila APK Android in modalità Release
+        run: flutter build apk --release --split-per-abi
+
+      - name: Compila APK Universale Android Release
+        run: flutter build apk --release
+
+      - name: Salva Android APK come Artifact scaricabile
+        uses: actions/upload-artifact@v4
+        with:
+          name: LanPulse-Android-Release-APK
+          path: |
+            build/app/outputs/flutter-apk/app-release.apk
+            build/app/outputs/flutter-apk/app-*-release.apk
+          retention-days: 30
+
+  # ============================================================================
+  # JOB 2: Compilazione Release Windows Desktop (.exe + DLL bundle)
+  # ============================================================================
+  build-windows:
+    name: Build Windows Release Executable (.exe)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout del repository
+        uses: actions/checkout@v4
+
+      - name: Configura ambiente Flutter per Windows Desktop
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          cache: true
+
+      - name: Abilita supporto desktop Windows e installa pacchetti
+        run: |
+          flutter config --enable-windows-desktop
+          flutter pub get
+
+      - name: Compila eseguibile Windows (.exe) in modalità Release
+        run: flutter build windows --release
+
+      - name: Crea archivio ZIP pronto per la distribuzione Windows
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "build/windows/x64/runner/Release/*" -DestinationPath "build/LanPulse-Windows-x64-Portable.zip"
+
+      - name: Salva eseguibile Windows (.exe + bundle) come Artifact scaricabile
+        uses: actions/upload-artifact@v4
+        with:
+          name: LanPulse-Windows-Release-EXE
+          path: |
+            build/windows/x64/runner/Release/
+            build/LanPulse-Windows-x64-Portable.zip
+          retention-days: 30
