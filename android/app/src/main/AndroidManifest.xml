@@ -1,5 +1,4 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="com.lanpulse.p2p">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <!-- Permessi fondamentali per Socket TCP/UDP e Discovery sulla rete Wi-Fi locale -->
     <uses-permission android:name="android.permission.INTERNET" />
