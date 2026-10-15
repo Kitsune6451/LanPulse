@@ -16,8 +16,17 @@ class NetworkConstants {
   /// Indirizzo Multicast IPv4 locale per reti in cui 255.255.255.255 è filtrato
   static const String multicastGroupIp = '239.255.45.45';
 
-  /// Dimensione chunk di lettura/scrittura file (64 KB ottimizza il throughput TCP)
+  /// Dimensione del singolo frammento di pacchetto file (64 KB)
   static const int fileChunkSizeBytes = 64 * 1024;
+
+  /// Numero di frammenti dopo i quali il destinatario invia un ACK di flusso (32 * 64KB = 2 MB)
+  static const int ackWindowChunks = 32;
+
+  /// Codici di controllo socket per permessi e frammentazione
+  static const int ctrlRejected = 0x00;
+  static const int ctrlAccepted = 0x01;
+  static const int ctrlChunkWindowAck = 0x02;
+  static const int ctrlTransferCompleteAck = 0x03;
 
   /// Intervallo di invio del beacon di presenza UDP
   static const Duration heartbeatInterval = Duration(seconds: 3);
