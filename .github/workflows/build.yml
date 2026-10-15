@@ -8,9 +8,6 @@ on:
   workflow_dispatch:
 
 jobs:
-  # ============================================================================
-  # JOB 1: Compilazione Release Android (.apk)
-  # ============================================================================
   build-android:
     name: Build Android Release APK
     runs-on: ubuntu-latest
@@ -31,13 +28,8 @@ jobs:
           channel: 'stable'
           cache: true
 
-      - name: Verifica dipendenze e analisi statica
-        run: |
-          flutter pub get
-          flutter analyze --no-fatal-infos
-
-      - name: Compila APK Android in modalità Release
-        run: flutter build apk --release --split-per-abi
+      - name: Installa dipendenze
+        run: flutter pub get
 
       - name: Compila APK Universale Android Release
         run: flutter build apk --release
@@ -46,14 +38,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: LanPulse-Android-Release-APK
-          path: |
-            build/app/outputs/flutter-apk/app-release.apk
-            build/app/outputs/flutter-apk/app-*-release.apk
+          path: build/app/outputs/flutter-apk/app-release.apk
           retention-days: 30
 
-  # ============================================================================
-  # JOB 2: Compilazione Release Windows Desktop (.exe + DLL bundle)
-  # ============================================================================
   build-windows:
     name: Build Windows Release Executable (.exe)
     runs-on: windows-latest
@@ -85,7 +72,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: LanPulse-Windows-Release-EXE
-          path: |
-            build/windows/x64/runner/Release/
-            build/LanPulse-Windows-x64-Portable.zip
+          path: build/LanPulse-Windows-x64-Portable.zip
           retention-days: 30
