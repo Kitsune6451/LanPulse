@@ -1,9 +1,11 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 
+import 'package:crypto/crypto.dart';
 import 'package:file_picker/file_picker.dart';
-import 'package:flutter/widgets.dart';
+import 'package:flutter/material.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -13,32 +15,87 @@ import '../models/p2p_packet.dart';
 import '../models/peer_node.dart';
 import '../services/discovery_service.dart';
 import '../services/socket_transfer_service.dart';
+import '../services/sound_service.dart';
+
+enum AppThemePreset {
+  cyberPulse('Cyber Pulse (Ciano)', Color(0xFF0284C7), Color(0xFF38BDF8)),
+  emeraldMatrix('Emerald Matrix (Verde)', Color(0xFF059669), Color(0xFF34D399)),
+  royalAmethyst('Royal Amethyst (Viola)', Color(0xFF7C3AED), Color(0xFFA78BFA)),
+  sunsetCrimson('Sunset Crimson (Rosso)', Color(0xFFE11D48), Color(0xFFFB7185)),
+  nordicFrost('Nordic Frost (Ghiaccio)', Color(0xFF0369A1), Color(0xFF7DD3FC)),
+  amberGold('Amber Gold (Ambra)', Color(0xFFD97706), Color(0xFFFBBF24));
+
+  final String label;
+  final Color lightSeed;
+  final Color darkSeed;
+  const AppThemePreset(this.label, this.lightSeed, this.darkSeed);
+}
+
+enum AppUiStyle {
+  modernGlass('Modern Glass (Morbido)', 18.0),
+  compactSharp('Compact Sharp (Tecnico)', 6.0),
+  minimalistFlat('Minimalist Flat (Piatto)', 12.0);
+
+  final String label;
+  final double borderRadius;
+  const AppUiStyle(this.label, this.borderRadius);
+}
+
+class PendingRequestItem {
+  final IncomingFileRequest request;
+  final Completer<bool> completer;
+
+  PendingRequestItem({
+    required this.request,
+    required this.completer,
+  });
+}
 
 class P2PController extends ChangeNotifier with WidgetsBindingObserver {
-  late final String localNodeId;
+  late String localNodeId;
   late String _localAlias;
   late final DiscoveryService _discoveryService;
   late final SocketTransferService _transferService;
+  final SoundService _soundService = SoundService();
 
-  List<PeerNode> _peers = [];
+  List<PeerNode> _onlinePeers = [];
+  final Map<String, PeerNode> _savedContacts = {};
   PeerNode? _selectedPeer;
+
   final List<P2PChatMessage> _messages = [];
+  final List<FileHistoryEntry> _fileHistory = [];
+  final Map<String, int> _unreadCounts = {};
+  final List<PendingRequestItem> _pendingFileRequests = [];
+
   double _activeTransferProgress = 0.0;
   bool _isTransferring = false;
   bool _isScanningWifi = false;
   String? _statusBanner;
   bool _isBannerError = false;
 
+  // Temi e Stili
   bool _isDarkMode = true;
   bool _useAmoledBlack = false;
-  bool _autoAcceptFiles = true;
+  AppThemePreset _themePreset = AppThemePreset.cyberPulse;
+  AppUiStyle _uiStyle = AppUiStyle.modernGlass;
+  bool _sfxEnabled = true;
+
+  // Google OAuth 2.0 Desktop & Mobile
   String? _googleDisplayName;
   String? _googleEmail;
   String? _googlePhotoUrl;
   bool _isAuthenticatingGoogle = false;
   HttpServer? _localAuthServer;
+  String _googleDesktopClientId = const String.fromEnvironment(
+    'GOOGLE_DESKTOP_CLIENT_ID',
+    defaultValue: '',
+  );
+  String _googleDesktopClientSecret = const String.fromEnvironment(
+    'GOOGLE_DESKTOP_CLIENT_SECRET',
+    defaultValue: '',
+  );
 
-  List<PeerNode> get peers => _peers;
+  // Getters
   PeerNode? get selectedPeer => _selectedPeer;
   String get localAlias => _localAlias;
   String? get localIp => _discoveryService.localIp;
@@ -52,19 +109,121 @@ class P2PController extends ChangeNotifier with WidgetsBindingObserver {
 
   bool get isDarkMode => _isDarkMode;
   bool get useAmoledBlack => _useAmoledBlack;
-  bool get autoAcceptFiles => _autoAcceptFiles;
+  AppThemePreset get themePreset => _themePreset;
+  AppUiStyle get uiStyle => _uiStyle;
+  bool get sfxEnabled => _sfxEnabled;
+
   bool get isGoogleSignedIn => _googleEmail != null;
   bool get isAuthenticatingGoogle => _isAuthenticatingGoogle;
   String? get googleDisplayName => _googleDisplayName;
   String? get googleEmail => _googleEmail;
   String? get googlePhotoUrl => _googlePhotoUrl;
+  String get googleDesktopClientId => _googleDesktopClientId;
+  String get googleDesktopClientSecret => _googleDesktopClientSecret;
+
+  List<FileHistoryEntry> get fileHistory => List.unmodifiable(_fileHistory);
+  List<FileHistoryEntry> get sentFileHistory =>
+      _fileHistory.where((f) => f.isOutgoing).toList();
+  List<FileHistoryEntry> get receivedFileHistory =>
+      _fileHistory.where((f) => !f.isOutgoing).toList();
+
+  List<PendingRequestItem> get pendingFileRequests =>
+      List.unmodifiable(_pendingFileRequests);
+
+  /// Unisce i nodi online sulla LAN e i contatti salvati (anche se offline)
+  List<PeerNode> get peers {
+    final Map<String, PeerNode> merged = {};
+
+    for (final saved in _savedContacts.values) {
+      merged[saved.nodeId] = saved.copyWith(isTrusted: true, isOnline: false);
+    }
+
+    for (final online in _onlinePeers) {
+      // Verifica se il nodo online corrisponde a un contatto salvato per ID o per IP
+      PeerNode? matchedContact = _savedContacts[online.nodeId];
+      if (matchedContact == null) {
+        for (final c in _savedContacts.values) {
+          if (c.ipAddress == online.ipAddress) {
+            matchedContact = c;
+            break;
+          }
+        }
+      }
+
+      final bool trusted = matchedContact != null;
+      merged[online.nodeId] = online.copyWith(
+        alias: matchedContact?.alias ?? online.alias,
+        isTrusted: trusted,
+        isOnline: true,
+      );
+    }
+
+    final List<PeerNode> result = merged.values.toList()
+      ..sort((a, b) {
+        if (a.isTrusted != b.isTrusted) return a.isTrusted ? -1 : 1;
+        if (a.isOnline != b.isOnline) return a.isOnline ? -1 : 1;
+        return a.alias.toLowerCase().compareTo(b.alias.toLowerCase());
+      });
+    return result;
+  }
+
+  List<PeerNode> get savedContactsList =>
+      peers.where((p) => p.isTrusted).toList();
+
+  /// Restituisce tutte le chat attive o permanenti per poter scorrere tra le diverse conversazioni
+  List<PeerNode> get activeChatPeers {
+    final Set<String> peerIdsWithMessages =
+        _messages.map((m) => m.peerId).toSet();
+    final List<PeerNode> allKnown = peers;
+    final Map<String, PeerNode> chatMap = {};
+
+    for (final p in allKnown) {
+      if (p.isTrusted || peerIdsWithMessages.contains(p.nodeId)) {
+        chatMap[p.nodeId] = p;
+      }
+    }
+
+    // Aggiungi eventuali peer con cui abbiamo messaggi ma che si sono disconnessi e non sono salvati
+    for (final msg in _messages) {
+      if (!chatMap.containsKey(msg.peerId)) {
+        chatMap[msg.peerId] = PeerNode(
+          nodeId: msg.peerId,
+          alias: msg.peerAlias,
+          ipAddress: 'Offline',
+          tcpPort: NetworkConstants.tcpTransferPort,
+          platform: PeerPlatform.unknown,
+          lastSeen: msg.timestamp,
+          isTrusted: false,
+          isOnline: false,
+        );
+      }
+    }
+
+    final List<PeerNode> list = chatMap.values.toList();
+    list.sort((a, b) {
+      final DateTime aTime = lastMessageForPeer(a.nodeId)?.timestamp ?? a.lastSeen;
+      final DateTime bTime = lastMessageForPeer(b.nodeId)?.timestamp ?? b.lastSeen;
+      return bTime.compareTo(aTime);
+    });
+    return list;
+  }
+
+  int unreadCountForPeer(String peerId) => _unreadCounts[peerId] ?? 0;
+
+  P2PChatMessage? lastMessageForPeer(String peerId) {
+    for (int i = _messages.length - 1; i >= 0; i--) {
+      if (_messages[i].peerId == peerId) return _messages[i];
+    }
+    return null;
+  }
+
+  List<P2PChatMessage> messagesForPeer(String peerId) {
+    return _messages.where((m) => m.peerId == peerId).toList();
+  }
 
   List<P2PChatMessage> get messagesForSelectedPeer {
     if (_selectedPeer == null) return [];
-    return _messages.where((m) {
-      if (m.peerId == _selectedPeer!.nodeId) return true;
-      return false;
-    }).toList();
+    return messagesForPeer(_selectedPeer!.nodeId);
   }
 
   P2PController() {
@@ -92,6 +251,7 @@ class P2PController extends ChangeNotifier with WidgetsBindingObserver {
       onRequestReverseConnect: (targetIp) {
         _discoveryService.sendReverseConnectRequest(targetIp);
       },
+      onIncomingFilePermissionCheck: _handleIncomingFilePermission,
     );
 
     _initializeApp();
@@ -100,13 +260,12 @@ class P2PController extends ChangeNotifier with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
-      // Quando l'utente torna nell'app dopo aver cambiato Wi-Fi, controlla subito la rete
       _discoveryService.checkNetworkChange();
     }
   }
 
   Future<void> _initializeApp() async {
-    await _loadSavedSettings();
+    await _loadSavedSettingsAndData();
 
     if (Platform.isAndroid) {
       try {
@@ -120,35 +279,225 @@ class P2PController extends ChangeNotifier with WidgetsBindingObserver {
     await _initializeNetworking();
   }
 
-  Future<void> _loadSavedSettings() async {
+  Future<void> _loadSavedSettingsAndData() async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      final savedAlias = prefs.getString('local_alias');
+
+      // Mantieni un localNodeId persistente così gli altri contatti ci riconoscono sempre
+      final String? savedNodeId = prefs.getString('local_node_id');
+      if (savedNodeId != null && savedNodeId.isNotEmpty) {
+        localNodeId = savedNodeId;
+      } else {
+        await prefs.setString('local_node_id', localNodeId);
+      }
+
+      final String? savedAlias = prefs.getString('local_alias');
       if (savedAlias != null && savedAlias.isNotEmpty) {
         _localAlias = savedAlias;
         _discoveryService.updateAlias(_localAlias);
         _transferService.localAlias = _localAlias;
       }
+
       _isDarkMode = prefs.getBool('dark_mode') ?? true;
       _useAmoledBlack = prefs.getBool('amoled_black') ?? false;
-      _autoAcceptFiles = prefs.getBool('auto_accept_files') ?? true;
+      _sfxEnabled = prefs.getBool('sfx_enabled') ?? true;
+
+      final String? presetName = prefs.getString('theme_preset');
+      if (presetName != null) {
+        _themePreset = AppThemePreset.values.firstWhere(
+          (e) => e.name == presetName,
+          orElse: () => AppThemePreset.cyberPulse,
+        );
+      }
+
+      final String? styleName = prefs.getString('ui_style');
+      if (styleName != null) {
+        _uiStyle = AppUiStyle.values.firstWhere(
+          (e) => e.name == styleName,
+          orElse: () => AppUiStyle.modernGlass,
+        );
+      }
+
       _googleDisplayName = prefs.getString('google_name');
       _googleEmail = prefs.getString('google_email');
       _googlePhotoUrl = prefs.getString('google_photo');
+      _googleDesktopClientId =
+          prefs.getString('google_client_id') ?? _googleDesktopClientId;
+      _googleDesktopClientSecret =
+          prefs.getString('google_client_secret') ?? _googleDesktopClientSecret;
+
+      // Carica i contatti salvati
+      final String? contactsJson = prefs.getString('saved_contacts_v2');
+      if (contactsJson != null && contactsJson.isNotEmpty) {
+        final List<dynamic> decoded = jsonDecode(contactsJson) as List<dynamic>;
+        for (final item in decoded) {
+          final PeerNode contact =
+              PeerNode.fromStorageMap(item as Map<String, dynamic>);
+          if (contact.nodeId.isNotEmpty) {
+            _savedContacts[contact.nodeId] = contact;
+          }
+        }
+      }
+
+      // Carica i messaggi permanenti dei contatti salvati
+      final String? messagesJson = prefs.getString('saved_messages_v2');
+      if (messagesJson != null && messagesJson.isNotEmpty) {
+        final List<dynamic> decoded = jsonDecode(messagesJson) as List<dynamic>;
+        _messages.clear();
+        for (final item in decoded) {
+          _messages.add(
+            P2PChatMessage.fromMap(item as Map<String, dynamic>),
+          );
+        }
+      }
+
+      // Carica la cronologia file inviati e ricevuti
+      final String? historyJson = prefs.getString('file_history_v2');
+      if (historyJson != null && historyJson.isNotEmpty) {
+        final List<dynamic> decoded = jsonDecode(historyJson) as List<dynamic>;
+        _fileHistory.clear();
+        for (final item in decoded) {
+          _fileHistory.add(
+            FileHistoryEntry.fromMap(item as Map<String, dynamic>),
+          );
+        }
+      }
+
       notifyListeners();
     } catch (_) {}
   }
 
+  Future<void> _persistContactsAndMessages() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final List<Map<String, dynamic>> contactsList =
+          _savedContacts.values.map((c) => c.toStorageMap()).toList();
+      await prefs.setString('saved_contacts_v2', jsonEncode(contactsList));
+
+      // Salva permanentemente i messaggi appartenenti ai contatti salvati
+      final Set<String> trustedIds = _savedContacts.keys.toSet();
+      final List<Map<String, dynamic>> persistentMessages = _messages
+          .where((m) => trustedIds.contains(m.peerId))
+          .map((m) => m.toMap())
+          .toList();
+      await prefs.setString('saved_messages_v2', jsonEncode(persistentMessages));
+    } catch (_) {}
+  }
+
+  Future<void> _persistFileHistory() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final List<Map<String, dynamic>> list =
+          _fileHistory.map((h) => h.toMap()).toList();
+      await prefs.setString('file_history_v2', jsonEncode(list));
+    } catch (_) {}
+  }
+
+  /// Verifica se un nodo è salvato come contatto fidato (per nodeId o per IP)
+  bool isPeerTrusted(String nodeId, [String? ipAddress]) {
+    if (_savedContacts.containsKey(nodeId)) return true;
+    if (ipAddress != null && ipAddress.isNotEmpty) {
+      return _savedContacts.values.any((c) => c.ipAddress == ipAddress);
+    }
+    return false;
+  }
+
+  /// Salva o rimuove un Host dai Contatti Fidati e rende la sua chat permanente
+  Future<void> toggleSaveContact(PeerNode peer, {String? customAlias}) async {
+    if (_savedContacts.containsKey(peer.nodeId)) {
+      _savedContacts.remove(peer.nodeId);
+      if (_selectedPeer?.nodeId == peer.nodeId) {
+        _selectedPeer = _selectedPeer!.copyWith(isTrusted: false);
+      }
+      _setBanner('${peer.alias} rimosso dai contatti fidati.');
+    } else {
+      final PeerNode saved = peer.copyWith(
+        alias: (customAlias != null && customAlias.trim().isNotEmpty)
+            ? customAlias.trim()
+            : peer.alias,
+        isTrusted: true,
+      );
+      _savedContacts[peer.nodeId] = saved;
+      if (_selectedPeer?.nodeId == peer.nodeId) {
+        _selectedPeer = saved.copyWith(isOnline: peer.isOnline);
+      }
+      _setBanner(
+        '${saved.alias} salvato nei Contatti Fidati! Chat permanente e ricezione file diretta attive.',
+      );
+    }
+    await _persistContactsAndMessages();
+    notifyListeners();
+  }
+
+  /// Gestisce la richiesta di autorizzazione quando arriva un file:
+  /// - Se l'host è un Contatto Fidato salvato -> Accetta automaticamente!
+  /// - Altrimenti -> Riproduce l'SFX e mostra la richiesta mandatoria all'utente.
+  Future<bool> _handleIncomingFilePermission(
+    IncomingFileRequest request,
+  ) async {
+    if (isPeerTrusted(request.senderId, request.senderIp)) {
+      return true; // Bypass automatico per gli host fidati salvati!
+    }
+
+    if (_sfxEnabled) {
+      unawaited(_soundService.playIncomingRequestSfx());
+    }
+
+    final Completer<bool> completer = Completer<bool>();
+    final PendingRequestItem item = PendingRequestItem(
+      request: request,
+      completer: completer,
+    );
+    _pendingFileRequests.add(item);
+    notifyListeners();
+
+    try {
+      return await completer.future.timeout(
+        const Duration(seconds: 85),
+        onTimeout: () => false,
+      );
+    } finally {
+      _pendingFileRequests.remove(item);
+      notifyListeners();
+    }
+  }
+
+  /// Risponde a una richiesta di invio file in entrata (Accetta / Accetta e Salva / Rifiuta)
+  Future<void> respondToFileRequest(
+    PendingRequestItem item, {
+    required bool accept,
+    bool trustSender = false,
+  }) async {
+    if (trustSender && accept) {
+      final PeerNode newTrusted = PeerNode(
+        nodeId: item.request.senderId,
+        alias: item.request.senderAlias,
+        ipAddress: item.request.senderIp,
+        tcpPort: NetworkConstants.tcpTransferPort,
+        platform: PeerPlatform.unknown,
+        lastSeen: DateTime.now(),
+        isTrusted: true,
+        isOnline: true,
+      );
+      _savedContacts[newTrusted.nodeId] = newTrusted;
+      await _persistContactsAndMessages();
+    }
+
+    if (!item.completer.isCompleted) {
+      item.completer.complete(accept);
+    }
+    _pendingFileRequests.remove(item);
+    notifyListeners();
+  }
+
   Future<void> _initializeNetworking() async {
-    // 1. Ascolta cambi automatici di connessione Wi-Fi / LAN
     _discoveryService.networkChangeStream.listen((newIp) async {
-      _selectedPeer = null; // Esci dalla chat non più valida sulla vecchia rete!
       _isTransferring = false;
       _activeTransferProgress = 0.0;
 
       if (newIp == null) {
         _setBanner(
-          'Disconnesso dalla rete Wi-Fi. Connettiti a una rete per riprendere.',
+          'Disconnesso dalla rete Wi-Fi. Le chat dei contatti salvati restano consultabili.',
           isError: true,
         );
       } else {
@@ -163,31 +512,42 @@ class P2PController extends ChangeNotifier with WidgetsBindingObserver {
       notifyListeners();
     });
 
-    // 2. Ascolta aggiornamenti della lista nodi
     _discoveryService.peersStream.listen((updatedPeers) {
-      _peers = updatedPeers;
+      _onlinePeers = updatedPeers;
 
-      // Se eravamo su una chat e il nodo si è disconnesso, esci dalla chat bloccata
+      // Sincronizza automaticamente l'IP dei contatti salvati quando tornano online
+      bool contactsUpdated = false;
+      for (final online in _onlinePeers) {
+        if (_savedContacts.containsKey(online.nodeId)) {
+          final PeerNode existing = _savedContacts[online.nodeId]!;
+          if (existing.ipAddress != online.ipAddress) {
+            _savedContacts[online.nodeId] = existing.copyWith(
+              ipAddress: online.ipAddress,
+              lastSeen: DateTime.now(),
+            );
+            contactsUpdated = true;
+          }
+        }
+      }
+      if (contactsUpdated) {
+        unawaited(_persistContactsAndMessages());
+      }
+
       if (_selectedPeer != null) {
-        final PeerNode? refreshed = _peers
+        final PeerNode? refreshed = peers
             .cast<PeerNode?>()
             .firstWhere((p) => p?.nodeId == _selectedPeer!.nodeId, orElse: () => null);
-        if (refreshed == null) {
-          _selectedPeer = null;
-          _setBanner(
-            'Il dispositivo con cui stavi chattando non è più sulla rete.',
-            isError: true,
-          );
-        } else {
+        if (refreshed != null) {
           _selectedPeer = refreshed;
+        } else {
+          // Non chiudere la chat! Segna solo il nodo come offline
+          _selectedPeer = _selectedPeer!.copyWith(isOnline: false);
         }
       }
       notifyListeners();
     });
 
-    // 3. Registra automaticamente i nodi scoperti tramite TCP Handshake o ricezione messaggi
     _transferService.discoveredPeerStream.listen((peer) {
-      // Unifica eventuali messaggi precedenti inviati tramite IP manuale
       for (int i = 0; i < _messages.length; i++) {
         if (_messages[i].peerId == 'manual-${peer.ipAddress}:${peer.tcpPort}') {
           _messages[i] = _messages[i].copyWith(
@@ -199,27 +559,57 @@ class P2PController extends ChangeNotifier with WidgetsBindingObserver {
 
       final PeerNode verified =
           _discoveryService.registerVerifiedPeer(peer, pin: true);
+      final bool trusted = isPeerTrusted(verified.nodeId, verified.ipAddress);
+      if (trusted && !_savedContacts.containsKey(verified.nodeId)) {
+        _savedContacts[verified.nodeId] = verified.copyWith(isTrusted: true);
+        unawaited(_persistContactsAndMessages());
+      }
+
       if (_selectedPeer == null ||
           _selectedPeer!.ipAddress == verified.ipAddress) {
-        _selectedPeer = verified;
+        _selectedPeer = verified.copyWith(isTrusted: trusted, isOnline: true);
       }
       notifyListeners();
     });
 
-    // 4. Ricezione messaggi e file
     _transferService.incomingMessages.listen((msg) {
       _messages.add(msg);
       _isTransferring = false;
       _activeTransferProgress = 0.0;
 
       if (_selectedPeer == null) {
-        final PeerNode? sender = _peers
+        final PeerNode? sender = peers
             .cast<PeerNode?>()
             .firstWhere((p) => p?.nodeId == msg.peerId, orElse: () => null);
         if (sender != null) {
           _selectedPeer = sender;
         }
+      } else if (_selectedPeer!.nodeId != msg.peerId) {
+        _unreadCounts[msg.peerId] = (_unreadCounts[msg.peerId] ?? 0) + 1;
       }
+
+      if (msg.type == TransferPayloadType.binaryFile) {
+        final PeerNode? senderNode = peers
+            .cast<PeerNode?>()
+            .firstWhere((p) => p?.nodeId == msg.peerId, orElse: () => null);
+        _fileHistory.insert(
+          0,
+          FileHistoryEntry(
+            id: msg.id,
+            fileName: msg.content,
+            filePath: msg.filePath,
+            fileSizeBytes: msg.fileSize ?? 0,
+            peerId: msg.peerId,
+            peerAlias: msg.peerAlias,
+            peerIp: senderNode?.ipAddress ?? '',
+            isOutgoing: false,
+            timestamp: msg.timestamp,
+          ),
+        );
+        unawaited(_persistFileHistory());
+      }
+
+      unawaited(_persistContactsAndMessages());
       notifyListeners();
     });
 
@@ -270,20 +660,46 @@ class P2PController extends ChangeNotifier with WidgetsBindingObserver {
 
   void selectPeer(PeerNode? peer) {
     _selectedPeer = peer;
+    if (peer != null) {
+      _unreadCounts.remove(peer.nodeId);
+    }
     _statusBanner = null;
     notifyListeners();
   }
 
-  /// Connessione diretta tramite IP Wi-Fi con Handshake TCP reale
+  /// Scorre rapidamente alla chat successiva o precedente nella lista delle chat
+  void cycleActiveChat(int delta) {
+    final List<PeerNode> chats = activeChatPeers;
+    if (chats.isEmpty) return;
+    if (_selectedPeer == null) {
+      selectPeer(chats.first);
+      return;
+    }
+    final int currentIndex =
+        chats.indexWhere((c) => c.nodeId == _selectedPeer!.nodeId);
+    if (currentIndex == -1) {
+      selectPeer(chats.first);
+      return;
+    }
+    final int nextIndex = (currentIndex + delta) % chats.length;
+    selectPeer(chats[nextIndex < 0 ? chats.length - 1 : nextIndex]);
+  }
+
+  Future<void> clearFileHistory() async {
+    _fileHistory.clear();
+    await _persistFileHistory();
+    notifyListeners();
+  }
+
   Future<bool> connectByIp({
     required String ipAddress,
     String? customAlias,
     int port = NetworkConstants.tcpTransferPort,
+    bool saveAsTrusted = false,
   }) async {
     String cleanIp = ipAddress.trim();
     int resolvedPort = port;
 
-    // Se l'utente incolla "192.168.1.45:45455", separa automaticamente IP e porta
     if (cleanIp.contains(':')) {
       final parts = cleanIp.split(':');
       cleanIp = parts[0].trim();
@@ -302,15 +718,24 @@ class P2PController extends ChangeNotifier with WidgetsBindingObserver {
     if (verifiedPeer != null) {
       final PeerNode finalPeer =
           (customAlias != null && customAlias.trim().isNotEmpty)
-              ? verifiedPeer.copyWith(alias: customAlias.trim())
-              : verifiedPeer;
+              ? verifiedPeer.copyWith(
+                  alias: customAlias.trim(),
+                  isTrusted:
+                      saveAsTrusted || isPeerTrusted(verifiedPeer.nodeId, cleanIp),
+                )
+              : verifiedPeer.copyWith(
+                  isTrusted:
+                      saveAsTrusted || isPeerTrusted(verifiedPeer.nodeId, cleanIp),
+                );
       _discoveryService.registerVerifiedPeer(finalPeer, pin: true);
-      _selectedPeer = finalPeer;
+      if (finalPeer.isTrusted) {
+        _savedContacts[finalPeer.nodeId] = finalPeer;
+        await _persistContactsAndMessages();
+      }
+      selectPeer(finalPeer);
       _setBanner('Connesso con successo a ${finalPeer.alias} ($cleanIp)!');
       return true;
     } else {
-      // Anche se il firewall del PC blocca l'handshake diretto, registra il nodo
-      // per usare il Reverse-Connect UDP/TCP quando invii un file o messaggio
       final PeerNode fallbackNode = PeerNode(
         nodeId: 'manual-$cleanIp:$resolvedPort',
         alias: (customAlias != null && customAlias.trim().isNotEmpty)
@@ -320,9 +745,15 @@ class P2PController extends ChangeNotifier with WidgetsBindingObserver {
         tcpPort: resolvedPort,
         platform: PeerPlatform.unknown,
         lastSeen: DateTime.now(),
+        isTrusted: saveAsTrusted,
+        isOnline: true,
       );
       _discoveryService.registerVerifiedPeer(fallbackNode, pin: true);
-      _selectedPeer = fallbackNode;
+      if (saveAsTrusted) {
+        _savedContacts[fallbackNode.nodeId] = fallbackNode;
+        await _persistContactsAndMessages();
+      }
+      selectPeer(fallbackNode);
       _discoveryService.sendReverseConnectRequest(cleanIp);
       _setBanner(
         'Nodo $cleanIp aggiunto. Richiesta di tunnel Wi-Fi inviata al dispositivo.',
@@ -355,17 +786,48 @@ class P2PController extends ChangeNotifier with WidgetsBindingObserver {
     notifyListeners();
   }
 
-  Future<void> toggleAutoAcceptFiles(bool value) async {
-    _autoAcceptFiles = value;
+  Future<void> setThemePreset(AppThemePreset preset) async {
+    _themePreset = preset;
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setBool('auto_accept_files', value);
+    await prefs.setString('theme_preset', preset.name);
     notifyListeners();
   }
 
-  /// Login Google:
-  /// - Su Android: prova il selettore nativo Google Play Services (`GoogleSignIn`).
-  /// - Su Windows PC (o fallback Android): avvia un server OAuth Loopback locale (`127.0.0.1`)
-  ///   e apre il browser predefinito di sistema per completare l'accesso nel browser.
+  Future<void> setUiStyle(AppUiStyle style) async {
+    _uiStyle = style;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('ui_style', style.name);
+    notifyListeners();
+  }
+
+  Future<void> toggleSfx(bool value) async {
+    _sfxEnabled = value;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('sfx_enabled', value);
+    if (value) {
+      unawaited(_soundService.playIncomingRequestSfx());
+    }
+    notifyListeners();
+  }
+
+  Future<void> saveGoogleOAuthCredentials({
+    required String clientId,
+    required String clientSecret,
+  }) async {
+    _googleDesktopClientId = clientId.trim();
+    _googleDesktopClientSecret = clientSecret.trim();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('google_client_id', _googleDesktopClientId);
+    await prefs.setString('google_client_secret', _googleDesktopClientSecret);
+    notifyListeners();
+  }
+
+  /// VERO Login Google OAuth 2.0:
+  /// - Su Android: usa GoogleSignIn nativo.
+  /// - Su Windows Desktop: avvia il flusso OAuth 2.0 Authorization Code + PKCE (RFC 8252)
+  ///   indirizzando il browser a `https://accounts.google.com/o/oauth2/v2/auth`,
+  ///   scambiando il codice su `https://oauth2.googleapis.com/token` e leggendo il profilo
+  ///   reale da `https://www.googleapis.com/oauth2/v3/userinfo`.
   Future<void> signInWithGoogle() async {
     if (_isAuthenticatingGoogle) return;
     _isAuthenticatingGoogle = true;
@@ -373,70 +835,154 @@ class P2PController extends ChangeNotifier with WidgetsBindingObserver {
 
     try {
       if (Platform.isAndroid) {
-        try {
-          final GoogleSignIn googleSignIn =
-              GoogleSignIn(scopes: ['email', 'profile']);
-          final GoogleSignInAccount? account = await googleSignIn.signIn();
-          if (account != null) {
-            await _saveGoogleProfile(
-              name: account.displayName ?? account.email.split('@').first,
-              email: account.email,
-              photoUrl: account.photoUrl,
-            );
-            _isAuthenticatingGoogle = false;
-            notifyListeners();
-            return;
-          }
-        } catch (_) {
-          // Se manca google-services.json sull'APK, usa il flusso Browser Loopback
+        final GoogleSignIn googleSignIn =
+            GoogleSignIn(scopes: ['openid', 'email', 'profile']);
+        final GoogleSignInAccount? account = await googleSignIn.signIn();
+        if (account != null) {
+          await _saveGoogleProfile(
+            name: account.displayName ?? account.email.split('@').first,
+            email: account.email,
+            photoUrl: account.photoUrl,
+          );
         }
+        return;
       }
 
-      await _startBrowserLoopbackGoogleAuth();
+      if (_googleDesktopClientId.isEmpty) {
+        _setBanner(
+          'Configura prima il tuo Google OAuth Desktop Client ID nelle Impostazioni per avviare il login Google.',
+          isError: true,
+        );
+        return;
+      }
+
+      await _startRealGoogleDesktopOAuthPkce();
     } catch (e) {
-      _setBanner('Errore durante l\'accesso Google: $e', isError: true);
+      _setBanner('Errore durante l\'accesso Google OAuth 2.0: $e', isError: true);
     } finally {
       _isAuthenticatingGoogle = false;
       notifyListeners();
     }
   }
 
-  Future<void> _startBrowserLoopbackGoogleAuth() async {
+  String _generateCodeVerifier() {
+    final math.Random random = math.Random.secure();
+    final List<int> values = List<int>.generate(32, (_) => random.nextInt(256));
+    return base64UrlEncode(values).replaceAll('=', '');
+  }
+
+  String _computeCodeChallenge(String verifier) {
+    final List<int> bytes = ascii.encode(verifier);
+    final Digest digest = sha256.convert(bytes);
+    return base64UrlEncode(digest.bytes).replaceAll('=', '');
+  }
+
+  Future<void> _startRealGoogleDesktopOAuthPkce() async {
     await _localAuthServer?.close(force: true);
     _localAuthServer = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     final int port = _localAuthServer!.port;
-    final String authUrl = 'http://127.0.0.1:$port/auth';
+    final String redirectUri = 'http://127.0.0.1:$port/callback';
 
-    // Apre automaticamente il browser di sistema su Windows o Android
+    final String codeVerifier = _generateCodeVerifier();
+    final String codeChallenge = _computeCodeChallenge(codeVerifier);
+    final String stateToken = const Uuid().v4();
+
+    final Uri googleAuthUri = Uri.https(
+      'accounts.google.com',
+      '/o/oauth2/v2/auth',
+      {
+        'client_id': _googleDesktopClientId,
+        'redirect_uri': redirectUri,
+        'response_type': 'code',
+        'scope': 'openid email profile',
+        'code_challenge': codeChallenge,
+        'code_challenge_method': 'S256',
+        'state': stateToken,
+        'access_type': 'offline',
+        'prompt': 'select_account',
+      },
+    );
+
     if (Platform.isWindows) {
-      await Process.run('cmd', ['/c', 'start', '', authUrl]);
+      await Process.run(
+        'rundll32',
+        ['url.dll,FileProtocolHandler', googleAuthUri.toString()],
+      );
     } else if (Platform.isLinux) {
-      await Process.run('xdg-open', [authUrl]);
+      await Process.run('xdg-open', [googleAuthUri.toString()]);
     } else if (Platform.isMacOS) {
-      await Process.run('open', [authUrl]);
+      await Process.run('open', [googleAuthUri.toString()]);
     }
 
     final Completer<void> doneCompleter = Completer<void>();
 
     _localAuthServer!.listen((HttpRequest request) async {
-      if (request.uri.path == '/auth') {
-        request.response.headers.contentType = ContentType.html;
-        request.response.write(_buildBrowserAuthHtml(port));
-        await request.response.close();
-      } else if (request.uri.path == '/callback') {
-        final String name =
-            request.uri.queryParameters['name']?.trim() ?? 'Utente Google';
-        final String email =
-            request.uri.queryParameters['email']?.trim() ?? 'account@gmail.com';
+      if (request.uri.path == '/callback') {
+        final String? returnedState = request.uri.queryParameters['state'];
+        final String? code = request.uri.queryParameters['code'];
+        final String? error = request.uri.queryParameters['error'];
 
-        request.response.headers.contentType = ContentType.html;
-        request.response.write(_buildBrowserSuccessHtml(name, email));
-        await request.response.close();
+        if (error != null || code == null || returnedState != stateToken) {
+          request.response.headers.contentType = ContentType.html;
+          request.response.write(
+            _buildOAuthResultHtml(
+              success: false,
+              message:
+                  'Autorizzazione Google annullata o non valida (${error ?? "state mismatch"}).',
+            ),
+          );
+          await request.response.close();
+          if (!doneCompleter.isCompleted) {
+            doneCompleter.completeError(
+              Exception(error ?? 'OAuth state mismatch'),
+            );
+          }
+          return;
+        }
 
-        await _saveGoogleProfile(name: name, email: email);
-        if (!doneCompleter.isCompleted) doneCompleter.complete();
-        await _localAuthServer?.close(force: true);
-        _localAuthServer = null;
+        try {
+          final Map<String, dynamic> profile = await _exchangeCodeForProfile(
+            code: code,
+            codeVerifier: codeVerifier,
+            redirectUri: redirectUri,
+          );
+
+          final String name =
+              (profile['name'] as String?) ?? 'Utente Google';
+          final String email =
+              (profile['email'] as String?) ?? '';
+          final String? picture = profile['picture'] as String?;
+
+          request.response.headers.contentType = ContentType.html;
+          request.response.write(
+            _buildOAuthResultHtml(
+              success: true,
+              message:
+                  'Accesso Google completato come <b>$name</b> ($email). Puoi chiudere questa scheda.',
+            ),
+          );
+          await request.response.close();
+
+          await _saveGoogleProfile(
+            name: name,
+            email: email,
+            photoUrl: picture,
+          );
+          if (!doneCompleter.isCompleted) doneCompleter.complete();
+        } catch (err) {
+          request.response.headers.contentType = ContentType.html;
+          request.response.write(
+            _buildOAuthResultHtml(
+              success: false,
+              message: 'Errore scambio token OAuth 2.0: $err',
+            ),
+          );
+          await request.response.close();
+          if (!doneCompleter.isCompleted) doneCompleter.completeError(err);
+        } finally {
+          await _localAuthServer?.close(force: true);
+          _localAuthServer = null;
+        }
       } else {
         request.response.statusCode = HttpStatus.notFound;
         await request.response.close();
@@ -448,64 +994,102 @@ class P2PController extends ChangeNotifier with WidgetsBindingObserver {
       onTimeout: () async {
         await _localAuthServer?.close(force: true);
         _localAuthServer = null;
+        throw TimeoutException('Tempo scaduto per il login Google nel browser.');
       },
     );
   }
 
-  String _buildBrowserAuthHtml(int port) {
-    final String hostName = Platform.localHostname;
-    return '''
-<!DOCTYPE html>
-<html lang="it">
-<head>
-  <meta charset="UTF-8">
-  <title>Accedi con Google - LanPulse P2P</title>
-  <style>
-    body { font-family: 'Segoe UI', Roboto, sans-serif; background: #0B1120; color: #F8FAFC; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
-    .card { background: #1E293B; padding: 36px; border-radius: 18px; width: 390px; box-shadow: 0 20px 45px rgba(0,0,0,0.45); border: 1px solid #334155; text-align: center; }
-    .logo { width: 48px; height: 48px; margin-bottom: 14px; }
-    h2 { margin: 0 0 8px 0; font-size: 22px; }
-    p { color: #94A3B8; font-size: 13.5px; margin-bottom: 24px; line-height: 1.5; }
-    input { width: 100%; box-sizing: border-box; padding: 12px 14px; margin-bottom: 12px; border-radius: 10px; border: 1px solid #475569; background: #0F172A; color: white; font-size: 14px; }
-    button { width: 100%; padding: 13px; border: none; border-radius: 10px; background: #0284C7; color: white; font-weight: 700; font-size: 15px; cursor: pointer; transition: 0.2s; }
-    button:hover { background: #0369A1; }
-    .quick { margin-top: 12px; background: #334155; font-size: 13px; }
-  </style>
-</head>
-<body>
-  <div class="card">
-    <svg class="logo" viewBox="0 0 48 48"><path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/><path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/><path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/><path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/></svg>
-    <h2>Autorizzazione Google</h2>
-    <p>Conferma l'identità Google nel browser per sincronizzare automaticamente <b>LanPulse P2P</b> su <b>$hostName</b>.</p>
-    <form action="http://127.0.0.1:$port/callback" method="GET">
-      <input type="text" name="name" placeholder="Nome profilo Google (es. $hostName)" value="$hostName" required autocomplete="name" />
-      <input type="email" name="email" placeholder="Il tuo indirizzo Gmail" value="$hostName@gmail.com" required autocomplete="email" />
-      <button type="submit">Autorizza e Connetti App</button>
-    </form>
-  </div>
-</body>
-</html>
-''';
+  Future<Map<String, dynamic>> _exchangeCodeForProfile({
+    required String code,
+    required String codeVerifier,
+    required String redirectUri,
+  }) async {
+    final HttpClient httpClient = HttpClient();
+    try {
+      // 1. Scambio Authorization Code -> Access Token & ID Token
+      final HttpClientRequest tokenReq = await httpClient.postUrl(
+        Uri.parse('https://oauth2.googleapis.com/token'),
+      );
+      tokenReq.headers.contentType = ContentType(
+        'application',
+        'x-www-form-urlencoded',
+        charset: 'utf-8',
+      );
+
+      final Map<String, String> bodyParams = {
+        'client_id': _googleDesktopClientId,
+        'code': code,
+        'code_verifier': codeVerifier,
+        'grant_type': 'authorization_code',
+        'redirect_uri': redirectUri,
+      };
+      if (_googleDesktopClientSecret.isNotEmpty) {
+        bodyParams['client_secret'] = _googleDesktopClientSecret;
+      }
+
+      final String formBody = bodyParams.entries
+          .map((e) =>
+              '${Uri.encodeQueryComponent(e.key)}=${Uri.encodeQueryComponent(e.value)}')
+          .join('&');
+      tokenReq.write(formBody);
+
+      final HttpClientResponse tokenResp = await tokenReq.close();
+      final String tokenRaw = await tokenResp.transform(utf8.decoder).join();
+      final Map<String, dynamic> tokenJson =
+          jsonDecode(tokenRaw) as Map<String, dynamic>;
+
+      if (tokenResp.statusCode != 200 || tokenJson['access_token'] == null) {
+        throw Exception(
+          tokenJson['error_description'] ??
+              tokenJson['error'] ??
+              'Risposta token non valida (${tokenResp.statusCode})',
+        );
+      }
+
+      final String accessToken = tokenJson['access_token'] as String;
+
+      // 2. Recupero profilo reale Google tramite endpoint OpenID UserInfo
+      final HttpClientRequest userReq = await httpClient.getUrl(
+        Uri.parse('https://www.googleapis.com/oauth2/v3/userinfo'),
+      );
+      userReq.headers.set(HttpHeaders.authorizationHeader, 'Bearer $accessToken');
+      final HttpClientResponse userResp = await userReq.close();
+      final String userRaw = await userResp.transform(utf8.decoder).join();
+
+      if (userResp.statusCode != 200) {
+        throw Exception('Impossibile recuperare userinfo Google ($userRaw)');
+      }
+
+      return jsonDecode(userRaw) as Map<String, dynamic>;
+    } finally {
+      httpClient.close();
+    }
   }
 
-  String _buildBrowserSuccessHtml(String name, String email) {
+  String _buildOAuthResultHtml({
+    required bool success,
+    required String message,
+  }) {
+    final String borderColor = success ? '#10B981' : '#EF4444';
+    final String title =
+        success ? '✓ Autenticazione Google Riuscita' : '✕ Errore Autenticazione';
     return '''
 <!DOCTYPE html>
 <html lang="it">
 <head>
   <meta charset="UTF-8">
-  <title>Accesso Completato - LanPulse P2P</title>
+  <title>LanPulse P2P - Google OAuth 2.0</title>
   <style>
     body { font-family: 'Segoe UI', sans-serif; background: #0B1120; color: #F8FAFC; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
-    .card { background: #1E293B; padding: 36px; border-radius: 18px; width: 380px; text-align: center; border: 1px solid #10B981; }
-    h2 { color: #10B981; margin-top: 0; }
-    p { color: #94A3B8; font-size: 14px; }
+    .card { background: #1E293B; padding: 36px; border-radius: 18px; width: 400px; text-align: center; border: 1px solid $borderColor; box-shadow: 0 20px 45px rgba(0,0,0,0.5); }
+    h2 { color: $borderColor; margin-top: 0; }
+    p { color: #CBD5E1; font-size: 14.5px; line-height: 1.5; }
   </style>
 </head>
 <body>
   <div class="card">
-    <h2>✓ Connesso a LanPulse P2P</h2>
-    <p>Benvenuto <b>$name</b> ($email).<br><br>Puoi chiudere questa scheda del browser e tornare all'applicazione.</p>
+    <h2>$title</h2>
+    <p>$message</p>
   </div>
 </body>
 </html>
@@ -520,7 +1104,7 @@ class P2PController extends ChangeNotifier with WidgetsBindingObserver {
     _googleDisplayName = name;
     _googleEmail = email;
     _googlePhotoUrl = photoUrl;
-    _localAlias = '$name (${Platform.isWindows ? "PC" : "S25"})';
+    _localAlias = '$name (${Platform.isWindows ? "PC" : "Android"})';
     _discoveryService.updateAlias(_localAlias);
     _transferService.localAlias = _localAlias;
 
@@ -531,7 +1115,7 @@ class P2PController extends ChangeNotifier with WidgetsBindingObserver {
     if (photoUrl != null) {
       await prefs.setString('google_photo', photoUrl);
     }
-    _setBanner('Account Google collegato come $_localAlias');
+    _setBanner('Account Google verificato: $name ($email)');
     notifyListeners();
   }
 
@@ -563,31 +1147,36 @@ class P2PController extends ChangeNotifier with WidgetsBindingObserver {
       );
       _messages.add(sent);
       _statusBanner = null;
+      await _persistContactsAndMessages();
       notifyListeners();
     } catch (e) {
       _setBanner(
-        'Impossibile inviare il messaggio a ${target.alias} (${target.ipAddress}). Verifica che siate sulla stessa Wi-Fi.',
+        'Impossibile inviare il messaggio a ${target.alias} (${target.ipAddress}). Verifica che sia online.',
         isError: true,
       );
     }
   }
 
-  /// Seleziona e invia un file a `targetOverride` (o al nodo selezionato)
+  /// Seleziona e invia un file usando il protocollo frammentato a 64 KB
   Future<void> pickAndSendFile({PeerNode? targetOverride}) async {
     if (_isTransferring) return;
     final PeerNode? target = targetOverride ?? _selectedPeer;
     if (target == null) {
-      _setBanner('Seleziona prima un dispositivo a cui inviare il file.', isError: true);
+      _setBanner(
+        'Seleziona prima un dispositivo a cui inviare il file.',
+        isError: true,
+      );
       return;
     }
 
-    _selectedPeer = target;
-    notifyListeners();
+    selectPeer(target);
 
     FilePickerResult? result;
     try {
+      // Con file grandi evitiamo di caricare l'intero file in memoria, usando il path nativo
       result = await FilePicker.platform.pickFiles(
         allowMultiple: false,
+        withData: false,
         withReadStream: true,
       );
     } catch (e) {
@@ -599,39 +1188,54 @@ class P2PController extends ChangeNotifier with WidgetsBindingObserver {
     final PlatformFile picked = result.files.single;
 
     final String fileName = picked.name;
-    final int totalBytes = picked.size;
-    Stream<List<int>>? stream = picked.readStream;
-    if (stream == null && picked.path != null) {
-      stream = File(picked.path!).openRead();
-    }
-
-    if (stream == null) {
-      _setBanner('Impossibile leggere il file selezionato.', isError: true);
-      return;
-    }
+    final int totalBytes = picked.path != null && File(picked.path!).existsSync()
+        ? await File(picked.path!).length()
+        : picked.size;
 
     _isTransferring = true;
     _activeTransferProgress = 0.0;
-    _statusBanner = null;
+    _statusBanner = !target.isTrusted
+        ? 'In attesa che ${target.alias} accetti la richiesta di trasferimento...'
+        : 'Invio frammentato di "$fileName" in corso...';
+    _isBannerError = false;
     notifyListeners();
 
     try {
-      final P2PChatMessage sentFileMsg = await _transferService.sendFileStream(
+      final P2PChatMessage sentFileMsg =
+          await _transferService.sendFileFragmented(
         targetPeer: target,
         fileName: fileName,
         totalBytes: totalBytes,
-        fileStream: stream,
         localFilePath: picked.path,
+        fallbackStream: picked.readStream,
         onProgress: (_, sent, total) {
           _activeTransferProgress = total > 0 ? sent / total : 0.0;
           notifyListeners();
         },
       );
+
       _messages.add(sentFileMsg);
+      _fileHistory.insert(
+        0,
+        FileHistoryEntry(
+          id: sentFileMsg.id,
+          fileName: fileName,
+          filePath: picked.path,
+          fileSizeBytes: totalBytes,
+          peerId: target.nodeId,
+          peerAlias: target.alias,
+          peerIp: target.ipAddress,
+          isOutgoing: true,
+          timestamp: sentFileMsg.timestamp,
+        ),
+      );
+
+      await _persistFileHistory();
+      await _persistContactsAndMessages();
       _setBanner('File "$fileName" inviato con successo a ${target.alias}!');
     } catch (e) {
       _setBanner(
-        'Trasferimento file fallito verso ${target.alias} (${target.ipAddress}):$e',
+        'Trasferimento file interrotto verso ${target.alias}:$e',
         isError: true,
       );
     } finally {
@@ -645,6 +1249,7 @@ class P2PController extends ChangeNotifier with WidgetsBindingObserver {
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _localAuthServer?.close(force: true);
+    _soundService.dispose();
     _discoveryService.dispose();
     _transferService.dispose();
     super.dispose();
