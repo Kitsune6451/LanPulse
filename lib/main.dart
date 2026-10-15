@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -5,22 +6,30 @@ import 'package:provider/provider.dart';
 import 'providers/p2p_controller.dart';
 import 'ui/screens/adaptive_home_screen.dart';
 
-Future<void> main() async {
-  WidgetsFlutterBinding.ensureInitialized();
+void main() {
+  runZonedGuarded(() async {
+    WidgetsFlutterBinding.ensureInitialized();
 
-  if (Platform.isAndroid) {
-    await [
-      Permission.nearbyWifiDevices,
-      Permission.locationWhenInUse,
-    ].request();
-  }
+    if (Platform.isAndroid) {
+      try {
+        await [
+          Permission.nearbyWifiDevices,
+          Permission.locationWhenInUse,
+        ].request();
+      } catch (e) {
+        debugPrint('Errore richiesta permessi nativi: $e');
+      }
+    }
 
-  runApp(
-    ChangeNotifierProvider(
-      create: (_) => P2PController(),
-      child: const LanPulseApp(),
-    ),
-  );
+    runApp(
+      ChangeNotifierProvider(
+        create: (_) => P2PController(),
+        child: const LanPulseApp(),
+      ),
+    );
+  }, (error, stack) {
+    debugPrint('Eccezione non gestita all\'avvio: $error');
+  });
 }
 
 class LanPulseApp extends StatelessWidget {
