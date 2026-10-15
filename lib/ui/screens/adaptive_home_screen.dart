@@ -49,7 +49,7 @@ class _AdaptiveHomeScreenState extends State<AdaptiveHomeScreen> {
           children: [
             Icon(Icons.wifi_tethering, color: Color(0xFF38BDF8)),
             SizedBox(width: 10),
-            Text('Connessione Diretta Wi-Fi (IP)'),
+            Expanded(child: Text('Connessione Diretta Wi-Fi (IP)')),
           ],
         ),
         content: SizedBox(
@@ -114,7 +114,8 @@ class _AdaptiveHomeScreenState extends State<AdaptiveHomeScreen> {
             onPressed: () async {
               final ip = ipCtrl.text.trim();
               if (ip.isEmpty) return;
-              final port = int.tryParse(portCtrl.text.trim()) ?? controller.tcpPort;
+              final port =
+                  int.tryParse(portCtrl.text.trim()) ?? controller.tcpPort;
               Navigator.pop(ctx);
               await controller.connectByIp(
                 ipAddress: ip,
@@ -135,7 +136,8 @@ class _AdaptiveHomeScreenState extends State<AdaptiveHomeScreen> {
     BuildContext context,
     P2PController controller,
   ) async {
-    final nameCtrl = TextEditingController(text: controller.googleDisplayName ?? '');
+    final nameCtrl =
+        TextEditingController(text: controller.googleDisplayName ?? '');
     final emailCtrl = TextEditingController(text: controller.googleEmail ?? '');
 
     await showDialog(
@@ -145,7 +147,7 @@ class _AdaptiveHomeScreenState extends State<AdaptiveHomeScreen> {
           children: [
             Icon(Icons.account_circle, color: Color(0xFF38BDF8)),
             SizedBox(width: 10),
-            Text('Accedi con Google'),
+            Expanded(child: Text('Accedi con Google')),
           ],
         ),
         content: SizedBox(
@@ -231,7 +233,11 @@ class _AdaptiveHomeScreenState extends State<AdaptiveHomeScreen> {
                     child: CircleAvatar(
                       radius: 22,
                       backgroundColor: Color(0xFF0284C7),
-                      child: Icon(Icons.bolt_rounded, color: Colors.white, size: 26),
+                      child: Icon(
+                        Icons.bolt_rounded,
+                        color: Colors.white,
+                        size: 26,
+                      ),
                     ),
                   ),
                   destinations: const [
@@ -253,7 +259,11 @@ class _AdaptiveHomeScreenState extends State<AdaptiveHomeScreen> {
                 else ...[
                   SizedBox(
                     width: 360,
-                    child: _buildPeersSidebar(context, controller, isDesktop: true),
+                    child: _buildPeersSidebar(
+                      context,
+                      controller,
+                      isDesktop: true,
+                    ),
                   ),
                   const VerticalDivider(width: 1),
                   Expanded(
@@ -279,7 +289,8 @@ class _AdaptiveHomeScreenState extends State<AdaptiveHomeScreen> {
           ),
           bottomNavigationBar: NavigationBar(
             selectedIndex: _activeTabIndex,
-            onDestinationSelected: (idx) => setState(() => _activeTabIndex = idx),
+            onDestinationSelected: (idx) =>
+                setState(() => _activeTabIndex = idx),
             destinations: [
               NavigationDestination(
                 icon: Badge(
@@ -360,7 +371,10 @@ class _AdaptiveHomeScreenState extends State<AdaptiveHomeScreen> {
               const SizedBox(height: 12),
               // Card IP ben visibile per condivisione Wi-Fi immediata
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 14,
+                  vertical: 12,
+                ),
                 decoration: BoxDecoration(
                   color: const Color(0xFF1E293B).withValues(alpha: 0.75),
                   borderRadius: BorderRadius.circular(14),
@@ -473,7 +487,8 @@ class _AdaptiveHomeScreenState extends State<AdaptiveHomeScreen> {
                           padding: const EdgeInsets.all(18),
                           decoration: BoxDecoration(
                             shape: BoxShape.circle,
-                            color: const Color(0xFF38BDF8).withValues(alpha: 0.1),
+                            color: const Color(0xFF38BDF8)
+                                .withValues(alpha: 0.1),
                           ),
                           child: const Icon(
                             Icons.wifi_find_rounded,
@@ -541,8 +556,8 @@ class _AdaptiveHomeScreenState extends State<AdaptiveHomeScreen> {
                             children: [
                               CircleAvatar(
                                 radius: 22,
-                                backgroundColor:
-                                    const Color(0xFF38BDF8).withValues(alpha: 0.15),
+                                backgroundColor: const Color(0xFF38BDF8)
+                                    .withValues(alpha: 0.15),
                                 child: Icon(
                                   peer.platform == PeerPlatform.windows
                                       ? Icons.desktop_windows_rounded
@@ -577,8 +592,7 @@ class _AdaptiveHomeScreenState extends State<AdaptiveHomeScreen> {
                                           decoration: BoxDecoration(
                                             color: (isManual
                                                     ? Colors.amber
-                                                    : Colors.emeraldAccent ??
-                                                        Colors.greenAccent)
+                                                    : Colors.greenAccent)
                                                 .withValues(alpha: 0.15),
                                             borderRadius:
                                                 BorderRadius.circular(20),
@@ -680,7 +694,10 @@ class _AdaptiveHomeScreenState extends State<AdaptiveHomeScreen> {
               CircleAvatar(
                 backgroundColor:
                     const Color(0xFF38BDF8).withValues(alpha: 0.15),
-                child: const Icon(Icons.devices_rounded, color: Color(0xFF38BDF8)),
+                child: const Icon(
+                  Icons.devices_rounded,
+                  color: Color(0xFF38BDF8),
+                ),
               ),
               const SizedBox(width: 12),
               Expanded(
@@ -729,7 +746,10 @@ class _AdaptiveHomeScreenState extends State<AdaptiveHomeScreen> {
                 padding: const EdgeInsets.symmetric(vertical: 4),
                 child: Text(
                   'Trasferimento in corso: ${(controller.activeTransferProgress * 100).toStringAsFixed(0)}%',
-                  style: const TextStyle(fontSize: 11, color: Color(0xFF38BDF8)),
+                  style: const TextStyle(
+                    fontSize: 11,
+                    color: Color(0xFF38BDF8),
+                  ),
                 ),
               ),
             ],
@@ -783,7 +803,8 @@ class _AdaptiveHomeScreenState extends State<AdaptiveHomeScreen> {
                                   Container(
                                     padding: const EdgeInsets.all(10),
                                     decoration: BoxDecoration(
-                                      color: Colors.white.withValues(alpha: 0.15),
+                                      color:
+                                          Colors.white.withValues(alpha: 0.15),
                                       borderRadius: BorderRadius.circular(10),
                                     ),
                                     child: const Icon(
@@ -922,7 +943,9 @@ class _AdaptiveHomeScreenState extends State<AdaptiveHomeScreen> {
 
         // SEZIONE 1: Account Google
         Card(
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16),
+          ),
           child: Padding(
             padding: const EdgeInsets.all(20),
             child: Column(
@@ -930,11 +953,17 @@ class _AdaptiveHomeScreenState extends State<AdaptiveHomeScreen> {
               children: [
                 const Row(
                   children: [
-                    Icon(Icons.account_circle_outlined, color: Color(0xFF38BDF8)),
+                    Icon(
+                      Icons.account_circle_outlined,
+                      color: Color(0xFF38BDF8),
+                    ),
                     SizedBox(width: 10),
                     Text(
                       'Account Google',
-                      style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold),
+                      style: TextStyle(
+                        fontSize: 17,
+                        fontWeight: FontWeight.bold,
+                      ),
                     ),
                   ],
                 ),
@@ -970,7 +999,10 @@ class _AdaptiveHomeScreenState extends State<AdaptiveHomeScreen> {
                       const Expanded(
                         child: Text(
                           'Accedi con Google per impostare automaticamente il tuo nome utente su tutti i dispositivi della rete.',
-                          style: TextStyle(color: Color(0xFF94A3B8), fontSize: 13),
+                          style: TextStyle(
+                            color: Color(0xFF94A3B8),
+                            fontSize: 13,
+                          ),
                         ),
                       ),
                       const SizedBox(width: 16),
@@ -990,7 +1022,9 @@ class _AdaptiveHomeScreenState extends State<AdaptiveHomeScreen> {
 
         // SEZIONE 2: Stato Rete & Indirizzo IP in Vista
         Card(
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16),
+          ),
           child: Padding(
             padding: const EdgeInsets.all(20),
             child: Column(
@@ -998,11 +1032,17 @@ class _AdaptiveHomeScreenState extends State<AdaptiveHomeScreen> {
               children: [
                 const Row(
                   children: [
-                    Icon(Icons.settings_ethernet_rounded, color: Color(0xFF38BDF8)),
+                    Icon(
+                      Icons.settings_ethernet_rounded,
+                      color: Color(0xFF38BDF8),
+                    ),
                     SizedBox(width: 10),
                     Text(
                       'Indirizzo IP Wi-Fi & Diagnostica Rete',
-                      style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold),
+                      style: TextStyle(
+                        fontSize: 17,
+                        fontWeight: FontWeight.bold,
+                      ),
                     ),
                   ],
                 ),
@@ -1075,7 +1115,9 @@ class _AdaptiveHomeScreenState extends State<AdaptiveHomeScreen> {
 
         // SEZIONE 3: Aspetto & Trasferimenti
         Card(
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16),
+          ),
           child: Column(
             children: [
               SwitchListTile(
