@@ -11,7 +11,7 @@ Future<void> main() async {
   if (Platform.isAndroid) {
     await [
       Permission.nearbyWifiDevices,
-      Permission.storage,
+      Permission.locationWhenInUse,
     ].request();
   }
 
