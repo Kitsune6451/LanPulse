@@ -1,7 +1,7 @@
 name: lanpulse_p2p
 description: Applicazione P2P Wi-Fi e IP Diretto di File Sharing e Messaggistica per Android e Windows (.exe).
 publish_to: 'none'
-version: 1.1.0+2
+version: 1.2.0+3
 
 environment:
   sdk: '>=3.4.0 <4.0.0'
@@ -19,6 +19,8 @@ dependencies:
   intl: ^0.19.0
   shared_preferences: ^2.3.2
   google_sign_in: ^6.2.1
+  audioplayers: ^6.1.0
+  video_player: ^2.9.2
 
 dev_dependencies:
   flutter_test:
