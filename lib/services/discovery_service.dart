@@ -10,27 +10,40 @@ class DiscoveryService {
   final String localNodeId;
   String localAlias;
   final int localTcpPort;
+  final void Function(String ip, int port)? onTcpPeerCandidateFound;
+  final void Function(String ip, int port)? onReverseConnectRequested;
 
   RawDatagramSocket? _udpSocket;
   Timer? _heartbeatTimer;
   Timer? _cleanupTimer;
+  Timer? _networkWatchTimer;
+
   String? _cachedLocalIp;
   List<String> _allLocalIps = [];
+  bool _isScanningSubnet = false;
+  bool _isInitialized = false;
 
   final Map<String, PeerNode> _activePeers = {};
-  final Set<String> _manualPeerIds = {};
+  final Set<String> _pinnedPeerIds = {};
+
   final StreamController<List<PeerNode>> _peersController =
       StreamController<List<PeerNode>>.broadcast();
+  final StreamController<String?> _networkChangeController =
+      StreamController<String?>.broadcast();
 
   Stream<List<PeerNode>> get peersStream => _peersController.stream;
+  Stream<String?> get networkChangeStream => _networkChangeController.stream;
   List<PeerNode> get currentPeers => _activePeers.values.toList();
   String? get localIp => _cachedLocalIp;
   List<String> get allLocalIps => _allLocalIps;
+  bool get isScanningSubnet => _isScanningSubnet;
 
   DiscoveryService({
     required this.localNodeId,
     required this.localAlias,
     this.localTcpPort = NetworkConstants.tcpTransferPort,
+    this.onTcpPeerCandidateFound,
+    this.onReverseConnectRequested,
   });
 
   PeerPlatform get _currentPlatform {
@@ -44,46 +57,58 @@ class DiscoveryService {
     _sendAnnouncementBeacon();
   }
 
-  /// Aggiunge o aggiorna un nodo manualmente tramite IP (Wi-Fi diretto, Hotspot, VPN)
-  PeerNode addManualPeer({
-    required String ipAddress,
-    String? customAlias,
-    int tcpPort = NetworkConstants.tcpTransferPort,
-  }) {
-    final String cleanIp = ipAddress.trim();
-    final String nodeId = 'manual-$cleanIp:$tcpPort';
-    final PeerNode node = PeerNode(
-      nodeId: nodeId,
-      alias: (customAlias != null && customAlias.trim().isNotEmpty)
-          ? customAlias.trim()
-          : 'Nodo Wi-Fi ($cleanIp)',
-      ipAddress: cleanIp,
-      tcpPort: tcpPort,
-      platform: PeerPlatform.unknown,
-      lastSeen: DateTime.now(),
+  /// Registra o aggiorna un nodo verificato via TCP Handshake o messaggio
+  PeerNode registerVerifiedPeer(PeerNode peer, {bool pin = false}) {
+    // Rimuove eventuali voci provvisorie con lo stesso IP
+    final List<String> duplicateIds = _activePeers.entries
+        .where((e) => e.value.ipAddress == peer.ipAddress && e.key != peer.nodeId)
+        .map((e) => e.key)
+        .toList();
+
+    for (final oldId in duplicateIds) {
+      _activePeers.remove(oldId);
+      _pinnedPeerIds.remove(oldId);
+    }
+
+    if (pin) {
+      _pinnedPeerIds.add(peer.nodeId);
+    }
+    _activePeers[peer.nodeId] = peer.copyWith(lastSeen: DateTime.now());
+    _emitSortedPeers();
+    return _activePeers[peer.nodeId]!;
+  }
+
+  void removePeer(String nodeId) {
+    _activePeers.remove(nodeId);
+    _pinnedPeerIds.remove(nodeId);
+    _emitSortedPeers();
+  }
+
+  /// Avvia il discovery UDP + il monitoraggio continuo dei cambi di rete Wi-Fi
+  Future<void> startDiscovery() async {
+    await _stopSocketsAndTimers();
+    _cachedLocalIp = await _resolveLocalWifiIp();
+    _isInitialized = true;
+
+    await _bindUdpSocket();
+
+    // Monitoraggio continuo del cambio rete (ogni 2 secondi)
+    _networkWatchTimer = Timer.periodic(
+      const Duration(seconds: 2),
+      (_) => checkNetworkChange(),
     );
 
-    _manualPeerIds.add(nodeId);
-    _activePeers[nodeId] = node;
-    _emitSortedPeers();
-    return node;
+    // Avvia anche una scansione TCP della sottorete Wi-Fi per aggirare blocchi UDP del router
+    unawaited(scanWifiSubnet());
   }
 
-  Future<void> refreshNetworkAddresses() async {
-    _cachedLocalIp = await _resolveLocalWifiIp();
-  }
-
-  /// Avvia il socket UDP su 0.0.0.0:45454 in modo sicuro per Android 14/15/16 e Windows
-  Future<void> startDiscovery() async {
-    await stopDiscovery();
-    _cachedLocalIp = await _resolveLocalWifiIp();
-
+  Future<void> _bindUdpSocket() async {
     try {
       _udpSocket = await RawDatagramSocket.bind(
         InternetAddress.anyIPv4,
         NetworkConstants.udpDiscoveryPort,
         reuseAddress: true,
-        reusePort: false, // CRITICO: reusePort=true causa crash SocketException su Android
+        reusePort: false,
       );
 
       _udpSocket!.broadcastEnabled = true;
@@ -107,8 +132,109 @@ class DiscoveryService {
         const Duration(seconds: 4),
         (_) => _pruneStalePeers(),
       );
-    } catch (_) {
-      // Anche se l'UDP è bloccato dalla rete, il trasferimento diretto via IP TCP resta attivo
+    } catch (_) {}
+  }
+
+  /// Verifica se l'utente ha cambiato connessione Wi-Fi / Hotspot / LAN
+  Future<bool> checkNetworkChange() async {
+    final String? newIp = await _resolveLocalWifiIp();
+    if (!_isInitialized) return false;
+
+    if (newIp != _cachedLocalIp) {
+      _cachedLocalIp = newIp;
+      // Svuota i nodi della rete precedente non più raggiungibili
+      _activePeers.clear();
+      _pinnedPeerIds.clear();
+      _emitSortedPeers();
+      _networkChangeController.add(newIp);
+
+      // Riavvia i socket UDP sulla nuova interfaccia
+      _heartbeatTimer?.cancel();
+      _cleanupTimer?.cancel();
+      _udpSocket?.close();
+      _udpSocket = null;
+
+      if (newIp != null) {
+        await _bindUdpSocket();
+        unawaited(scanWifiSubnet());
+      }
+      return true;
+    }
+    return false;
+  }
+
+  /// Scansiona la sottorete Wi-Fi locale via TCP sulla porta 45455 per trovare
+  /// dispositivi anche quando il router o Android bloccano il broadcast UDP.
+  Future<void> scanWifiSubnet() async {
+    if (_isScanningSubnet) return;
+    final String? ip = _cachedLocalIp ?? await _resolveLocalWifiIp();
+    if (ip == null || ip == '0.0.0.0') return;
+
+    final List<String> parts = ip.split('.');
+    if (parts.length != 4) return;
+    final String prefix = '${parts[0]}.${parts[1]}.${parts[2]}';
+    final int selfLastOctet = int.tryParse(parts[3]) ?? -1;
+
+    _isScanningSubnet = true;
+    try {
+      const int batchSize = 30;
+      for (int start = 1; start <= 254; start += batchSize) {
+        // Se nel frattempo la rete è cambiata, interrompi la scansione
+        if (_cachedLocalIp != ip) break;
+
+        final List<Future<void>> batch = [];
+        final int end = (start + batchSize - 1).clamp(1, 254);
+
+        for (int i = start; i <= end; i++) {
+          if (i == selfLastOctet) continue;
+          final String targetIp = '$prefix.$i';
+          batch.add(_probeTcpHost(targetIp, localTcpPort));
+        }
+        await Future.wait(batch);
+      }
+    } finally {
+      _isScanningSubnet = false;
+    }
+  }
+
+  Future<void> _probeTcpHost(String ip, int port) async {
+    try {
+      final Socket s = await Socket.connect(
+        ip,
+        port,
+        timeout: const Duration(milliseconds: 350),
+      );
+      await s.close();
+      onTcpPeerCandidateFound?.call(ip, port);
+    } catch (_) {}
+  }
+
+  /// Richiede al nodo remoto (es. PC protetto da Windows Firewall) di aprire
+  /// una connessione TCP inversa verso questo dispositivo.
+  void sendReverseConnectRequest(String targetIp) {
+    final RawDatagramSocket? socket = _udpSocket;
+    final String? myIp = _cachedLocalIp;
+    if (socket == null || myIp == null) return;
+
+    final String payload = jsonEncode({
+      'magic': NetworkConstants.protocolMagic,
+      'type': 'REVERSE_CONNECT',
+      'nodeId': localNodeId,
+      'alias': localAlias,
+      'ip': myIp,
+      'tcpPort': localTcpPort,
+    });
+    final List<int> bytes = utf8.encode(payload);
+
+    try {
+      socket.send(bytes, InternetAddress(targetIp), NetworkConstants.udpDiscoveryPort);
+    } catch (_) {}
+
+    final String? broadcast = _computeSubnetBroadcast(myIp);
+    if (broadcast != null) {
+      try {
+        socket.send(bytes, InternetAddress(broadcast), NetworkConstants.udpDiscoveryPort);
+      } catch (_) {}
     }
   }
 
@@ -117,34 +243,50 @@ class DiscoveryService {
     final Datagram? datagram = _udpSocket!.receive();
     if (datagram == null) return;
 
+    final String senderIp = datagram.address.address;
     final String rawPayload = utf8.decode(datagram.data, allowMalformed: true);
+
+    try {
+      final Map<String, dynamic> map =
+          jsonDecode(rawPayload) as Map<String, dynamic>;
+      if (map['magic'] != NetworkConstants.protocolMagic) return;
+      if (map['nodeId'] == localNodeId) return;
+
+      if (map['type'] == 'REVERSE_CONNECT') {
+        final int port =
+            (map['tcpPort'] as num?)?.toInt() ?? NetworkConstants.tcpTransferPort;
+        onReverseConnectRequested?.call(senderIp, port);
+        return;
+      }
+    } catch (_) {
+      return;
+    }
+
     final PeerNode? discovered = PeerNode.fromBeaconJson(
       rawPayload,
       NetworkConstants.protocolMagic,
-      fallbackSenderIp: datagram.address.address,
+      fallbackSenderIp: senderIp,
     );
 
     if (discovered == null || discovered.nodeId == localNodeId) {
       return;
     }
 
-    // Rimuove eventuale duplicato manuale se lo stesso IP viene rilevato automaticamente
-    _activePeers.removeWhere(
-      (key, value) =>
-          _manualPeerIds.contains(key) &&
-          value.ipAddress == discovered.ipAddress,
-    );
+    // Usa sempre l'IP reale del pacchetto IP se quello dichiarato è 0.0.0.0 o di altra sottorete
+    final String effectiveIp =
+        (discovered.ipAddress == '0.0.0.0' || discovered.ipAddress.isEmpty)
+            ? senderIp
+            : discovered.ipAddress;
 
-    _activePeers[discovered.nodeId] = discovered;
-    _emitSortedPeers();
+    registerVerifiedPeer(discovered.copyWith(ipAddress: effectiveIp));
   }
 
   Future<void> _sendAnnouncementBeacon() async {
     final RawDatagramSocket? socket = _udpSocket;
     if (socket == null) return;
 
-    _cachedLocalIp ??= await _resolveLocalWifiIp();
     final String ip = _cachedLocalIp ?? '0.0.0.0';
+    if (ip == '0.0.0.0') return;
 
     final PeerNode selfNode = PeerNode(
       nodeId: localNodeId,
@@ -158,15 +300,18 @@ class DiscoveryService {
     final List<int> payloadBytes =
         utf8.encode(selfNode.toBeaconJson(NetworkConstants.protocolMagic));
 
-    final String? subnetBroadcast = _computeSubnetBroadcast(ip);
-    if (subnetBroadcast != null) {
-      try {
-        socket.send(
-          payloadBytes,
-          InternetAddress(subnetBroadcast),
-          NetworkConstants.udpDiscoveryPort,
-        );
-      } catch (_) {}
+    // Invia sul broadcast di tutte le interfacce Wi-Fi/LAN rilevate
+    for (final localAddr in _allLocalIps) {
+      final String? subnetBroadcast = _computeSubnetBroadcast(localAddr);
+      if (subnetBroadcast != null) {
+        try {
+          socket.send(
+            payloadBytes,
+            InternetAddress(subnetBroadcast),
+            NetworkConstants.udpDiscoveryPort,
+          );
+        } catch (_) {}
+      }
     }
 
     try {
@@ -192,14 +337,19 @@ class DiscoveryService {
     return '${octets[0]}.${octets[1]}.${octets[2]}.255';
   }
 
-  /// Risolve l'IP Wi-Fi / Hotspot / LAN su Android e Windows
+  /// Risolve l'IP Wi-Fi reale ignorando adattatori virtuali (VirtualBox .56.1, WSL, Mobile Data)
   Future<String?> _resolveLocalWifiIp() async {
-    final List<String> detectedIps = [];
+    final List<String> priorityWifiIps = [];
+    final List<String> fallbackLanIps = [];
 
     try {
-      final String? wifiIp = await NetworkInfo().getWifiIP();
-      if (wifiIp != null && wifiIp.isNotEmpty && wifiIp != '127.0.0.1') {
-        detectedIps.add(wifiIp);
+      final String? pluginWifiIp = await NetworkInfo().getWifiIP();
+      if (pluginWifiIp != null &&
+          pluginWifiIp.isNotEmpty &&
+          pluginWifiIp != '127.0.0.1' &&
+          pluginWifiIp != '0.0.0.0' &&
+          !pluginWifiIp.startsWith('192.168.56.')) {
+        priorityWifiIps.add(pluginWifiIp);
       }
     } catch (_) {}
 
@@ -210,39 +360,67 @@ class DiscoveryService {
       );
 
       for (final NetworkInterface iface in interfaces) {
-        final String lowerName = iface.name.toLowerCase();
-        if (lowerName.contains('vethernet') ||
-            lowerName.contains('wsl') ||
-            lowerName.contains('docker') ||
-            lowerName.contains('vmware') ||
-            lowerName.contains('vbox')) {
+        final String name = iface.name.toLowerCase();
+        // Scarta interfacce virtuali o rete dati cellulare Android (rmnet/ccmni)
+        if (name.contains('vethernet') ||
+            name.contains('wsl') ||
+            name.contains('docker') ||
+            name.contains('vmware') ||
+            name.contains('vbox') ||
+            name.contains('virtual') ||
+            name.contains('rmnet') ||
+            name.contains('ccmni') ||
+            name.contains('tun') ||
+            name.contains('tap') ||
+            name.contains('tailscale') ||
+            name.contains('zerotier')) {
           continue;
         }
+
+        final bool isWifiOrHotspot = name.contains('wlan') ||
+            name.contains('wi-fi') ||
+            name.contains('wifi') ||
+            name.contains('swlan') ||
+            name.contains('ap') ||
+            name.contains('hotspot');
+
         for (final InternetAddress addr in iface.addresses) {
-          if (!detectedIps.contains(addr.address)) {
-            detectedIps.add(addr.address);
+          final String ip = addr.address;
+          if (ip.startsWith('169.254.') || ip.startsWith('192.168.56.')) {
+            continue; // Ignora link-local e VirtualBox Host-Only
+          }
+          if (isWifiOrHotspot) {
+            if (!priorityWifiIps.contains(ip)) priorityWifiIps.add(ip);
+          } else {
+            if (!fallbackLanIps.contains(ip)) fallbackLanIps.add(ip);
           }
         }
       }
     } catch (_) {}
 
-    _allLocalIps = detectedIps;
+    _allLocalIps = [...priorityWifiIps, ...fallbackLanIps];
 
-    // Priorità a 192.168.x.x (Wi-Fi domestico / Hotspot Android)
-    for (final ip in detectedIps) {
+    for (final ip in priorityWifiIps) {
+      if (ip.startsWith('192.168.') ||
+          ip.startsWith('172.') ||
+          ip.startsWith('10.')) {
+        return ip;
+      }
+    }
+    for (final ip in fallbackLanIps) {
       if (ip.startsWith('192.168.')) return ip;
     }
-    for (final ip in detectedIps) {
-      if (ip.startsWith('10.') || ip.startsWith('172.')) return ip;
+    for (final ip in fallbackLanIps) {
+      if (ip.startsWith('172.') || ip.startsWith('10.')) return ip;
     }
-    return detectedIps.isNotEmpty ? detectedIps.first : null;
+    return _allLocalIps.isNotEmpty ? _allLocalIps.first : null;
   }
 
   void _pruneStalePeers() {
     final DateTime now = DateTime.now();
     bool removedAny = false;
     _activePeers.removeWhere((id, peer) {
-      if (_manualPeerIds.contains(id)) return false; // Non rimuovere i nodi aggiunti via IP
+      if (_pinnedPeerIds.contains(id)) return false;
       final bool isStale =
           now.difference(peer.lastSeen) > NetworkConstants.peerStaleTimeout;
       if (isStale) removedAny = true;
@@ -259,15 +437,22 @@ class DiscoveryService {
     _peersController.add(list);
   }
 
-  Future<void> stopDiscovery() async {
+  Future<void> _stopSocketsAndTimers() async {
     _heartbeatTimer?.cancel();
     _cleanupTimer?.cancel();
+    _networkWatchTimer?.cancel();
     _udpSocket?.close();
     _udpSocket = null;
+  }
+
+  Future<void> stopDiscovery() async {
+    _isInitialized = false;
+    await _stopSocketsAndTimers();
   }
 
   void dispose() {
     stopDiscovery();
     _peersController.close();
+    _networkChangeController.close();
   }
 }
