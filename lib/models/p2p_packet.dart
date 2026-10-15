@@ -21,6 +21,9 @@ class TcpTransferHeader {
   final int payloadSizeBytes;
   final String? sha256Checksum;
   final int timestampMs;
+  final bool chunkedProtocol;
+  final int chunkSize;
+  final int totalChunks;
 
   const TcpTransferHeader({
     required this.transferId,
@@ -35,6 +38,9 @@ class TcpTransferHeader {
     this.textContent,
     this.fileName,
     this.sha256Checksum,
+    this.chunkedProtocol = true,
+    this.chunkSize = 65536,
+    this.totalChunks = 0,
   });
 
   Map<String, dynamic> toMap() => {
@@ -50,6 +56,9 @@ class TcpTransferHeader {
         'payloadSizeBytes': payloadSizeBytes,
         'sha256Checksum': sha256Checksum,
         'timestampMs': timestampMs,
+        'chunkedProtocol': chunkedProtocol,
+        'chunkSize': chunkSize,
+        'totalChunks': totalChunks,
       };
 
   factory TcpTransferHeader.fromMap(Map<String, dynamic> map) {
@@ -75,6 +84,9 @@ class TcpTransferHeader {
       sha256Checksum: map['sha256Checksum'] as String?,
       timestampMs: (map['timestampMs'] as num?)?.toInt() ??
           DateTime.now().millisecondsSinceEpoch,
+      chunkedProtocol: map['chunkedProtocol'] as bool? ?? false,
+      chunkSize: (map['chunkSize'] as num?)?.toInt() ?? 65536,
+      totalChunks: (map['totalChunks'] as num?)?.toInt() ?? 0,
     );
   }
 
@@ -135,4 +147,113 @@ class P2PChatMessage {
       progress: progress ?? this.progress,
     );
   }
+
+  Map<String, dynamic> toMap() => {
+        'id': id,
+        'peerId': peerId,
+        'peerAlias': peerAlias,
+        'isOutgoing': isOutgoing,
+        'type': type.name,
+        'content': content,
+        'filePath': filePath,
+        'fileSize': fileSize,
+        'progress': progress,
+        'timestamp': timestamp.millisecondsSinceEpoch,
+      };
+
+  factory P2PChatMessage.fromMap(Map<String, dynamic> map) {
+    final String rawType = map['type'] as String? ?? 'textMessage';
+    final TransferPayloadType parsedType = rawType == 'binaryFile'
+        ? TransferPayloadType.binaryFile
+        : TransferPayloadType.textMessage;
+
+    return P2PChatMessage(
+      id: map['id'] as String? ?? '',
+      peerId: map['peerId'] as String? ?? '',
+      peerAlias: map['peerAlias'] as String? ?? '',
+      isOutgoing: map['isOutgoing'] as bool? ?? true,
+      type: parsedType,
+      content: map['content'] as String? ?? '',
+      filePath: map['filePath'] as String?,
+      fileSize: (map['fileSize'] as num?)?.toInt(),
+      progress: (map['progress'] as num?)?.toDouble() ?? 1.0,
+      timestamp: DateTime.fromMillisecondsSinceEpoch(
+        (map['timestamp'] as num?)?.toInt() ??
+            DateTime.now().millisecondsSinceEpoch,
+      ),
+    );
+  }
+}
+
+class FileHistoryEntry {
+  final String id;
+  final String fileName;
+  final String? filePath;
+  final int fileSizeBytes;
+  final String peerId;
+  final String peerAlias;
+  final String peerIp;
+  final bool isOutgoing;
+  final DateTime timestamp;
+
+  const FileHistoryEntry({
+    required this.id,
+    required this.fileName,
+    required this.fileSizeBytes,
+    required this.peerId,
+    required this.peerAlias,
+    required this.peerIp,
+    required this.isOutgoing,
+    required this.timestamp,
+    this.filePath,
+  });
+
+  Map<String, dynamic> toMap() => {
+        'id': id,
+        'fileName': fileName,
+        'filePath': filePath,
+        'fileSizeBytes': fileSizeBytes,
+        'peerId': peerId,
+        'peerAlias': peerAlias,
+        'peerIp': peerIp,
+        'isOutgoing': isOutgoing,
+        'timestamp': timestamp.millisecondsSinceEpoch,
+      };
+
+  factory FileHistoryEntry.fromMap(Map<String, dynamic> map) {
+    return FileHistoryEntry(
+      id: map['id'] as String? ?? '',
+      fileName: map['fileName'] as String? ?? 'File',
+      filePath: map['filePath'] as String?,
+      fileSizeBytes: (map['fileSizeBytes'] as num?)?.toInt() ?? 0,
+      peerId: map['peerId'] as String? ?? '',
+      peerAlias: map['peerAlias'] as String? ?? 'Dispositivo',
+      peerIp: map['peerIp'] as String? ?? '',
+      isOutgoing: map['isOutgoing'] as bool? ?? true,
+      timestamp: DateTime.fromMillisecondsSinceEpoch(
+        (map['timestamp'] as num?)?.toInt() ??
+            DateTime.now().millisecondsSinceEpoch,
+      ),
+    );
+  }
+}
+
+class IncomingFileRequest {
+  final String transferId;
+  final String senderId;
+  final String senderAlias;
+  final String senderIp;
+  final String fileName;
+  final int fileSizeBytes;
+  final DateTime timestamp;
+
+  const IncomingFileRequest({
+    required this.transferId,
+    required this.senderId,
+    required this.senderAlias,
+    required this.senderIp,
+    required this.fileName,
+    required this.fileSizeBytes,
+    required this.timestamp,
+  });
 }
