@@ -6,7 +6,7 @@ plugins {
 
 android {
     namespace = "com.lanpulse.p2p"
-    compileSdk = 34
+    compileSdk = 36
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
