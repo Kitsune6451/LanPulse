@@ -30,7 +30,7 @@ class LanPulseApp extends StatelessWidget {
     final Color seed = isDark
         ? controller.themePreset.darkSeed
         : controller.themePreset.lightSeed;
-    final double radius = controller.uiStyle.borderRadius;
+    const double radius = 16.0;
 
     final Color bgColor = isDark
         ? (controller.useAmoledBlack
