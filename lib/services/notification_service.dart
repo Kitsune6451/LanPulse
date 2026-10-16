@@ -1,0 +1,208 @@
+import 'dart:io';
+import 'package:flutter_background/flutter_background.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+
+typedef NotificationActionCallback = void Function(
+  String transferId,
+  bool accepted,
+);
+
+class NotificationAndBackgroundService {
+  static final NotificationAndBackgroundService instance =
+      NotificationAndBackgroundService._();
+  NotificationAndBackgroundService._();
+
+  final FlutterLocalNotificationsPlugin _notifications =
+      FlutterLocalNotificationsPlugin();
+  NotificationActionCallback? onFileRequestDecision;
+  bool _initialized = false;
+
+  static const int _progressNotifId = 2001;
+  static const int _completionNotifId = 2002;
+
+  Future<void> initialize({
+    NotificationActionCallback? onDecision,
+  }) async {
+    onFileRequestDecision = onDecision;
+    if (_initialized) return;
+
+    if (Platform.isAndroid) {
+      const AndroidInitializationSettings androidInit =
+          AndroidInitializationSettings('@mipmap/ic_launcher');
+      const InitializationSettings initSettings =
+          InitializationSettings(android: androidInit);
+
+      await _notifications.initialize(
+        initSettings,
+        onDidReceiveNotificationResponse: _onNotificationResponse,
+      );
+
+      final AndroidFlutterLocalNotificationsPlugin? androidPlugin =
+          _notifications.resolvePlatformSpecificImplementation<
+              AndroidFlutterLocalNotificationsPlugin>();
+      await androidPlugin?.requestNotificationsPermission();
+
+      await _enableAndroidBackgroundExecution();
+    }
+    _initialized = true;
+  }
+
+  Future<void> _enableAndroidBackgroundExecution() async {
+    if (!Platform.isAndroid) return;
+    try {
+      const androidConfig = FlutterBackgroundAndroidConfig(
+        notificationTitle: 'LanPulse P2P Attivo',
+        notificationText:
+            'In ascolto sulla rete Wi-Fi per ricevere file e messaggi',
+        notificationImportance: AndroidNotificationImportance.low,
+        enableWifiLock: true,
+      );
+      final bool hasPermissions =
+          await FlutterBackground.initialize(androidConfig: androidConfig);
+      if (hasPermissions) {
+        await FlutterBackground.enableBackgroundExecution();
+      }
+    } catch (_) {}
+  }
+
+  void _onNotificationResponse(NotificationResponse response) {
+    final String? payload = response.payload;
+    if (payload == null || payload.isEmpty) return;
+
+    if (response.actionId == 'ACCEPT_FILE') {
+      onFileRequestDecision?.call(payload, true);
+    } else if (response.actionId == 'REJECT_FILE') {
+      onFileRequestDecision?.call(payload, false);
+    }
+  }
+
+  /// Mostra una notifica interattiva su Android con i pulsanti "Accetta" e "Rifiuta"
+  Future<void> showIncomingFileRequestNotification({
+    required String transferId,
+    required String senderAlias,
+    required String fileName,
+    required String formattedSize,
+  }) async {
+    if (!Platform.isAndroid) return;
+    try {
+      final int notifId = transferId.hashCode.abs() % 100000;
+      const AndroidNotificationDetails androidDetails =
+          AndroidNotificationDetails(
+        'lanpulse_requests_channel',
+        'Richieste di Invio File',
+        channelDescription:
+            'Notifiche per accettare o rifiutare file in entrata in background',
+        importance: Importance.max,
+        priority: Priority.high,
+        ongoing: true,
+        autoCancel: true,
+        actions: <AndroidNotificationAction>[
+          AndroidNotificationAction(
+            'ACCEPT_FILE',
+            'Accetta',
+            showsUserInterface: false,
+            cancelNotification: true,
+          ),
+          AndroidNotificationAction(
+            'REJECT_FILE',
+            'Rifiuta',
+            showsUserInterface: false,
+            cancelNotification: true,
+          ),
+        ],
+      );
+
+      await _notifications.show(
+        notifId,
+        'Richiesta file da $senderAlias',
+        '"$fileName" ($formattedSize) • Tocca Accetta o Rifiuta',
+        const NotificationDetails(android: androidDetails),
+        payload: transferId,
+      );
+    } catch (_) {}
+  }
+
+  Future<void> cancelRequestNotification(String transferId) async {
+    if (!Platform.isAndroid) return;
+    try {
+      final int notifId = transferId.hashCode.abs() % 100000;
+      await _notifications.cancel(notifId);
+    } catch (_) {}
+  }
+
+  /// Mostra l'avanzamento attuale del trasferimento sulla barra di stato Android
+  Future<void> showTransferProgressNotification({
+    required String fileName,
+    required String peerAlias,
+    required bool isOutgoing,
+    required int progressPercent,
+    required bool isPaused,
+  }) async {
+    if (!Platform.isAndroid) return;
+    try {
+      final AndroidNotificationDetails androidDetails =
+          AndroidNotificationDetails(
+        'lanpulse_progress_channel',
+        'Avanzamento Trasferimenti',
+        channelDescription: 'Stato di avanzamento dei file inviati e ricevuti',
+        importance: Importance.low,
+        priority: Priority.low,
+        onlyAlertOnce: true,
+        ongoing: true,
+        showProgress: true,
+        maxProgress: 100,
+        progress: progressPercent.clamp(0, 100),
+      );
+
+      final String prefix = isPaused
+          ? 'In pausa'
+          : (isOutgoing ? 'Invio a $peerAlias' : 'Ricezione da $peerAlias');
+
+      await _notifications.show(
+        _progressNotifId,
+        '$prefix ($progressPercent%)',
+        fileName,
+        NotificationDetails(android: androidDetails),
+      );
+    } catch (_) {}
+  }
+
+  /// Mostra la notifica finale di completamento (o interruzione) del trasferimento su Android
+  Future<void> showTransferCompletedNotification({
+    required String fileName,
+    required String peerAlias,
+    required bool isOutgoing,
+    required bool success,
+  }) async {
+    if (!Platform.isAndroid) return;
+    try {
+      await _notifications.cancel(_progressNotifId);
+
+      const AndroidNotificationDetails androidDetails =
+          AndroidNotificationDetails(
+        'lanpulse_completion_channel',
+        'Completamento Trasferimenti',
+        channelDescription: 'Avvisi di completamento trasferimento file',
+        importance: Importance.high,
+        priority: Priority.high,
+      );
+
+      final String title = success
+          ? (isOutgoing
+              ? 'File inviato a $peerAlias'
+              : 'File ricevuto da $peerAlias')
+          : 'Trasferimento interrotto';
+
+      final String body = success
+          ? 'Completato: "$fileName"'
+          : 'Il trasferimento di "$fileName" è stato annullato o interrotto.';
+
+      await _notifications.show(
+        _completionNotifId,
+        title,
+        body,
+        const NotificationDetails(android: androidDetails),
+      );
+    } catch (_) {}
+  }
+}
