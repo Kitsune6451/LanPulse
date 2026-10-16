@@ -269,13 +269,14 @@ class P2PController extends ChangeNotifier with WidgetsBindingObserver {
           respondToFileRequest(match, accept: accepted);
         }
       },
-      onStopApp: () {
-        _transferService.stopServer();
-        _discoveryService.stopDiscovery();
-        exit(0);
+      onStopApp: () async {
+        _transferService.cancelActiveTransfer();
+        await _transferService.stopServer();
+        await _discoveryService.stopDiscovery();
+        await _notifService.stopAndroidForegroundServiceAndExit();
       },
     );
-
+    
     await _initializeNetworking();
   }
 
