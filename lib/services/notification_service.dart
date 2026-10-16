@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
@@ -6,6 +7,11 @@ typedef NotificationActionCallback = void Function(
   String transferId,
   bool accepted,
 );
+
+@pragma('vm:entry-point')
+void notificationTapBackground(NotificationResponse response) {
+  NotificationAndBackgroundService.instance.handleResponse(response);
+}
 
 class NotificationAndBackgroundService {
   static final NotificationAndBackgroundService instance =
@@ -15,7 +21,7 @@ class NotificationAndBackgroundService {
   final FlutterLocalNotificationsPlugin _notifications =
       FlutterLocalNotificationsPlugin();
   NotificationActionCallback? onFileRequestDecision;
-  VoidCallback? onStopBackgroundRequested;
+  Future<void> Function()? onStopBackgroundRequested;
   bool _initialized = false;
 
   static const int _foregroundServiceNotifId = 1001;
@@ -24,7 +30,7 @@ class NotificationAndBackgroundService {
 
   Future<void> initialize({
     NotificationActionCallback? onDecision,
-    VoidCallback? onStopApp,
+    Future<void> Function()? onStopApp,
   }) async {
     onFileRequestDecision = onDecision;
     onStopBackgroundRequested = onStopApp;
@@ -38,7 +44,8 @@ class NotificationAndBackgroundService {
 
       await _notifications.initialize(
         initSettings,
-        onDidReceiveNotificationResponse: _onNotificationResponse,
+        onDidReceiveNotificationResponse: handleResponse,
+        onDidReceiveBackgroundNotificationResponse: notificationTapBackground,
       );
 
       final AndroidFlutterLocalNotificationsPlugin? androidPlugin =
@@ -69,7 +76,9 @@ class NotificationAndBackgroundService {
           AndroidNotificationAction(
             'STOP_BACKGROUND_APP',
             'Chiudi App',
-            showsUserInterface: false,
+            // showsUserInterface: true è INDISPENSABILE su Android affinché il tap
+            // sul pulsante risvegli l'isolate principale e chiuda davvero l'app!
+            showsUserInterface: true,
             cancelNotification: true,
           ),
         ],
@@ -78,7 +87,7 @@ class NotificationAndBackgroundService {
       await androidPlugin.startForegroundService(
         _foregroundServiceNotifId,
         'LanPulse P2P Attivo',
-        'In ascolto sulla rete Wi-Fi • Tocca Chiudi App per terminare',
+        'In ascolto sulla rete Wi-Fi • Tocca "Chiudi App" per arrestare',
         notificationDetails: fgDetails,
         foregroundServiceTypes: {
           AndroidServiceForegroundType.foregroundServiceTypeDataSync,
@@ -87,23 +96,30 @@ class NotificationAndBackgroundService {
     } catch (_) {}
   }
 
-  /// Ferma e rimuove il servizio in background nativo di Android
-  Future<void> stopAndroidForegroundService() async {
+  /// Ferma il ForegroundService, cancella tutte le notifiche e chiude l'Activity Android
+  Future<void> stopAndroidForegroundServiceAndExit() async {
     if (!Platform.isAndroid) return;
     try {
       final AndroidFlutterLocalNotificationsPlugin? androidPlugin =
           _notifications.resolvePlatformSpecificImplementation<
               AndroidFlutterLocalNotificationsPlugin>();
       await androidPlugin?.stopForegroundService();
-      await _notifications.cancel(_foregroundServiceNotifId);
+      await _notifications.cancelAll();
     } catch (_) {}
+
+    // Chiude l'Activity nativa Android in modo pulito (evitando crash al riavvio)
+    await SystemNavigator.pop(animated: true);
   }
 
-  void _onNotificationResponse(NotificationResponse response) {
+  void handleResponse(NotificationResponse response) {
     final String? payload = response.payload;
 
     if (response.actionId == 'STOP_BACKGROUND_APP') {
-      onStopBackgroundRequested?.call();
+      if (onStopBackgroundRequested != null) {
+        onStopBackgroundRequested!();
+      } else {
+        stopAndroidForegroundServiceAndExit();
+      }
       return;
     }
 
@@ -139,13 +155,13 @@ class NotificationAndBackgroundService {
           AndroidNotificationAction(
             'ACCEPT_FILE',
             'Accetta',
-            showsUserInterface: false,
+            showsUserInterface: true,
             cancelNotification: true,
           ),
           AndroidNotificationAction(
             'REJECT_FILE',
             'Rifiuta',
-            showsUserInterface: false,
+            showsUserInterface: true,
             cancelNotification: true,
           ),
         ],
