@@ -69,7 +69,7 @@ class NotificationAndBackgroundService {
           AndroidNotificationAction(
             'STOP_BACKGROUND_APP',
             'Chiudi App',
-            showsUserInterface: true,
+            showsUserInterface: false,
             cancelNotification: true,
           ),
         ],
@@ -84,6 +84,18 @@ class NotificationAndBackgroundService {
           AndroidServiceForegroundType.foregroundServiceTypeDataSync,
         },
       );
+    } catch (_) {}
+  }
+
+  /// Ferma e rimuove il servizio in background nativo di Android
+  Future<void> stopAndroidForegroundService() async {
+    if (!Platform.isAndroid) return;
+    try {
+      final AndroidFlutterLocalNotificationsPlugin? androidPlugin =
+          _notifications.resolvePlatformSpecificImplementation<
+              AndroidFlutterLocalNotificationsPlugin>();
+      await androidPlugin?.stopForegroundService();
+      await _notifications.cancel(_foregroundServiceNotifId);
     } catch (_) {}
   }
 
