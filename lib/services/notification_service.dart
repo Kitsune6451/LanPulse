@@ -14,6 +14,7 @@ class NotificationAndBackgroundService {
   final FlutterLocalNotificationsPlugin _notifications =
       FlutterLocalNotificationsPlugin();
   NotificationActionCallback? onFileRequestDecision;
+  VoidCallback? onStopBackgroundRequested;
   bool _initialized = false;
 
   static const int _foregroundServiceNotifId = 1001;
@@ -22,8 +23,10 @@ class NotificationAndBackgroundService {
 
   Future<void> initialize({
     NotificationActionCallback? onDecision,
+    VoidCallback? onStopApp,
   }) async {
     onFileRequestDecision = onDecision;
+    onStopBackgroundRequested = onStopApp;
     if (_initialized) return;
 
     if (Platform.isAndroid) {
@@ -56,17 +59,25 @@ class NotificationAndBackgroundService {
         'lanpulse_bg_service',
         'Servizio Background LanPulse',
         channelDescription:
-            'Mantiene attivo il ascolto P2P sulla rete Wi-Fi in background',
+            'Mantiene attivo l\'ascolto P2P sulla rete Wi-Fi in background',
         importance: Importance.low,
         priority: Priority.low,
         ongoing: true,
         playSound: false,
+        actions: <AndroidNotificationAction>[
+          AndroidNotificationAction(
+            'STOP_BACKGROUND_APP',
+            'Chiudi App',
+            showsUserInterface: true,
+            cancelNotification: true,
+          ),
+        ],
       );
 
       await androidPlugin.startForegroundService(
         _foregroundServiceNotifId,
         'LanPulse P2P Attivo',
-        'In ascolto sulla rete Wi-Fi per ricevere file e messaggi',
+        'In ascolto sulla rete Wi-Fi • Tocca Chiudi App per terminare',
         notificationDetails: fgDetails,
         foregroundServiceTypes: {
           AndroidServiceForegroundType.foregroundServiceTypeDataSync,
@@ -77,6 +88,12 @@ class NotificationAndBackgroundService {
 
   void _onNotificationResponse(NotificationResponse response) {
     final String? payload = response.payload;
+
+    if (response.actionId == 'STOP_BACKGROUND_APP') {
+      onStopBackgroundRequested?.call();
+      return;
+    }
+
     if (payload == null || payload.isEmpty) return;
 
     if (response.actionId == 'ACCEPT_FILE') {
@@ -86,7 +103,6 @@ class NotificationAndBackgroundService {
     }
   }
 
-  /// Mostra una notifica interattiva su Android con i pulsanti "Accetta" e "Rifiuta"
   Future<void> showIncomingFileRequestNotification({
     required String transferId,
     required String senderAlias,
@@ -140,7 +156,6 @@ class NotificationAndBackgroundService {
     } catch (_) {}
   }
 
-  /// Mostra l'avanzamento attuale del trasferimento sulla barra di stato Android
   Future<void> showTransferProgressNotification({
     required String fileName,
     required String peerAlias,
@@ -177,7 +192,6 @@ class NotificationAndBackgroundService {
     } catch (_) {}
   }
 
-  /// Mostra la notifica finale di completamento (o interruzione) del trasferimento su Android
   Future<void> showTransferCompletedNotification({
     required String fileName,
     required String peerAlias,
