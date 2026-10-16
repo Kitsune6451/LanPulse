@@ -11,30 +11,44 @@ import '../core/constants/network_constants.dart';
 import '../models/p2p_packet.dart';
 import '../models/peer_node.dart';
 
-typedef ProgressCallback = void Function(
-  String transferId,
-  int transferredBytes,
-  int totalBytes,
-);
+typedef TransferTaskUpdateCallback = void Function(ActiveTransferTask? task);
 
 typedef FilePermissionCheckCallback = Future<bool> Function(
   IncomingFileRequest request,
 );
 
-/// Lettore asincrono bufferizzato su singolo listener per leggere header, ACK e frammenti
-/// dallo stesso Socket TCP senza causare eccezioni di stream multi-subscription.
+/// Lettore asincrono ad alte prestazioni che intercetta anche segnali di Pausa/Riprendi/Annulla
 class _BufferedSocketReader {
   final BytesBuilder _buffer = BytesBuilder(copy: false);
   final Queue<Completer<void>> _waiters = Queue<Completer<void>>();
   StreamSubscription<Uint8List>? _sub;
   bool _isClosed = false;
   Object? _error;
+  final void Function(int controlByte)? onOutOfBandControlByte;
+  bool interceptSingleControlBytes = false;
 
-  _BufferedSocketReader(Socket socket) {
+  _BufferedSocketReader(
+    Socket socket, {
+    this.onOutOfBandControlByte,
+  }) {
     _sub = socket.listen(
       (Uint8List data) {
         if (data.isEmpty) return;
-        _buffer.add(data);
+        if (interceptSingleControlBytes && onOutOfBandControlByte != null) {
+          // Quando il mittente sta inviando un file, i byte ricevuti dal destinatario
+          // sono segnali di controllo (PAUSE / RESUME / CANCEL / COMPLETE_ACK)
+          for (final int b in data) {
+            if (b == NetworkConstants.ctrlPause ||
+                b == NetworkConstants.ctrlResume ||
+                b == NetworkConstants.ctrlCancel) {
+              onOutOfBandControlByte!(b);
+            } else {
+              _buffer.addByte(b);
+            }
+          }
+        } else {
+          _buffer.add(data);
+        }
         _notifyWaiters();
       },
       onError: (Object err) {
@@ -59,7 +73,7 @@ class _BufferedSocketReader {
 
   Future<Uint8List> readExact(
     int count, {
-    Duration timeout = const Duration(seconds: 30),
+    Duration timeout = const Duration(minutes: 30),
   }) async {
     if (count == 0) return Uint8List(0);
 
@@ -73,7 +87,7 @@ class _BufferedSocketReader {
       }
       final Duration remaining = deadline.difference(DateTime.now());
       if (remaining.isNegative) {
-        throw TimeoutException('Timeout in attesa di $count byte dal peer.');
+        throw TimeoutException('Timeout in attesa di dati dal peer.');
       }
       final Completer<void> waiter = Completer<void>();
       _waiters.add(waiter);
@@ -89,7 +103,7 @@ class _BufferedSocketReader {
   }
 
   Future<int> readByte({
-    Duration timeout = const Duration(seconds: 30),
+    Duration timeout = const Duration(minutes: 30),
   }) async {
     final Uint8List b = await readExact(1, timeout: timeout);
     return b[0];
@@ -102,16 +116,23 @@ class _BufferedSocketReader {
 }
 
 class SocketTransferService {
-  final String localNodeId;
+  String localNodeId;
   String localAlias;
   final int listenPort;
   final String? Function() getLocalIp;
   final void Function(String targetIp)? onRequestReverseConnect;
   final FilePermissionCheckCallback? onIncomingFilePermissionCheck;
+  final TransferTaskUpdateCallback? onTransferTaskUpdated;
 
   ServerSocket? _serverSocket;
   final Uuid _uuid = const Uuid();
-  ProgressCallback? _onIncomingProgress;
+
+  /// Controlli per Pausa / Riprendi / Annulla del trasferimento attivo
+  Socket? _activeTransferSocket;
+  ActiveTransferTask? _currentTask;
+  bool _isPaused = false;
+  bool _isCancelled = false;
+  Completer<void>? _resumeCompleter;
 
   final Map<String, List<Completer<Socket>>> _pendingReverseSocketsByIp = {};
 
@@ -130,6 +151,7 @@ class SocketTransferService {
     required this.getLocalIp,
     this.onRequestReverseConnect,
     this.onIncomingFilePermissionCheck,
+    this.onTransferTaskUpdated,
     this.listenPort = NetworkConstants.tcpTransferPort,
   });
 
@@ -147,9 +169,90 @@ class SocketTransferService {
     };
   }
 
-  Future<void> startServer({ProgressCallback? onIncomingProgress}) async {
+  /// Mette in pausa il trasferimento attivo (sia in invio che in ricezione)
+  void pauseActiveTransfer() {
+    if (_currentTask == null || _isPaused) return;
+    _isPaused = true;
+    _resumeCompleter = Completer<void>();
+    try {
+      _activeTransferSocket?.add(const [NetworkConstants.ctrlPause]);
+    } catch (_) {}
+    _currentTask = _currentTask!.copyWith(
+      state: TransferTaskState.paused,
+      speedBytesPerSec: 0,
+    );
+    onTransferTaskUpdated?.call(_currentTask);
+  }
+
+  /// Riprende il trasferimento messo in pausa
+  void resumeActiveTransfer() {
+    if (_currentTask == null || !_isPaused) return;
+    _isPaused = false;
+    if (_resumeCompleter != null && !_resumeCompleter!.isCompleted) {
+      _resumeCompleter!.complete();
+    }
+    try {
+      _activeTransferSocket?.add(const [NetworkConstants.ctrlResume]);
+    } catch (_) {}
+    _currentTask = _currentTask!.copyWith(state: TransferTaskState.running);
+    onTransferTaskUpdated?.call(_currentTask);
+  }
+
+  /// Annulla immediatamente il trasferimento in corso e pulisce i file parziali
+  void cancelActiveTransfer() {
+    if (_currentTask == null) return;
+    _isCancelled = true;
+    _isPaused = false;
+    if (_resumeCompleter != null && !_resumeCompleter!.isCompleted) {
+      _resumeCompleter!.complete();
+    }
+    try {
+      _activeTransferSocket?.add(const [NetworkConstants.ctrlCancel]);
+      _activeTransferSocket?.destroy();
+    } catch (_) {}
+    _currentTask = _currentTask!.copyWith(
+      state: TransferTaskState.cancelled,
+      speedBytesPerSec: 0,
+    );
+    onTransferTaskUpdated?.call(null);
+  }
+
+  void _handleRemoteControlByte(int controlByte) {
+    if (_currentTask == null) return;
+    if (controlByte == NetworkConstants.ctrlPause) {
+      _isPaused = true;
+      _resumeCompleter ??= Completer<void>();
+      _currentTask = _currentTask!.copyWith(
+        state: TransferTaskState.paused,
+        speedBytesPerSec: 0,
+      );
+      onTransferTaskUpdated?.call(_currentTask);
+    } else if (controlByte == NetworkConstants.ctrlResume) {
+      _isPaused = false;
+      if (_resumeCompleter != null && !_resumeCompleter!.isCompleted) {
+        _resumeCompleter!.complete();
+      }
+      _currentTask = _currentTask!.copyWith(state: TransferTaskState.running);
+      onTransferTaskUpdated?.call(_currentTask);
+    } else if (controlByte == NetworkConstants.ctrlCancel) {
+      _isCancelled = true;
+      _isPaused = false;
+      if (_resumeCompleter != null && !_resumeCompleter!.isCompleted) {
+        _resumeCompleter!.complete();
+      }
+      _activeTransferSocket?.destroy();
+    }
+  }
+
+  Future<void> _waitWhilePaused() async {
+    while (_isPaused && !_isCancelled) {
+      _resumeCompleter ??= Completer<void>();
+      await _resumeCompleter!.future;
+    }
+  }
+
+  Future<void> startServer() async {
     await stopServer();
-    _onIncomingProgress = onIncomingProgress;
 
     if (Platform.isWindows) {
       _tryConfigureWindowsFirewall();
@@ -294,18 +397,17 @@ class SocketTransferService {
     _BufferedSocketReader? reader;
     IOSink? outputFileSink;
     String? savedFilePath;
+    bool transferCompletedSuccessfully = false;
 
     try {
       socket.setOption(SocketOption.tcpNoDelay, true);
       reader = _BufferedSocketReader(socket);
 
-      // 1. Legge i 4 byte di lunghezza dell'Header JSON
       final Uint8List lengthBytes =
           await reader.readExact(4, timeout: const Duration(seconds: 15));
       final int headerLength =
           ByteData.sublistView(lengthBytes).getUint32(0, Endian.big);
 
-      // 2. Legge l'Header JSON completo
       final Uint8List headerJsonBytes = await reader.readExact(
         headerLength,
         timeout: const Duration(seconds: 15),
@@ -337,7 +439,6 @@ class SocketTransferService {
         );
       }
 
-      // Caso 1: Handshake
       if (parsedHeader.type == TransferPayloadType.handshake) {
         final String replyJson = jsonEncode({
           'nodeId': localNodeId,
@@ -351,7 +452,6 @@ class SocketTransferService {
         return;
       }
 
-      // Caso 2: Reverse Connect (pullPending)
       if (parsedHeader.type == TransferPayloadType.pullPending) {
         final List<Completer<Socket>>? waiters =
             _pendingReverseSocketsByIp[peerRealIp] ??
@@ -368,7 +468,6 @@ class SocketTransferService {
         return;
       }
 
-      // Caso 3: Messaggio di testo
       if (parsedHeader.type == TransferPayloadType.textMessage) {
         _incomingMessagesController.add(
           P2PChatMessage(
@@ -388,7 +487,7 @@ class SocketTransferService {
         return;
       }
 
-      // Caso 4: File binario in arrivo (con richiesta mandatoria se non fidato)
+      // Ricezione File Binario
       final IncomingFileRequest fileReq = IncomingFileRequest(
         transferId: parsedHeader.transferId,
         senderId: parsedHeader.senderId,
@@ -410,7 +509,22 @@ class SocketTransferService {
         return;
       }
 
-      // Invia conferma di accettazione al mittente
+      _activeTransferSocket = socket;
+      _isPaused = false;
+      _isCancelled = false;
+      _currentTask = ActiveTransferTask(
+        transferId: parsedHeader.transferId,
+        fileName: parsedHeader.fileName ?? 'File',
+        peerId: parsedHeader.senderId,
+        peerAlias: parsedHeader.senderAlias,
+        isOutgoing: false,
+        transferredBytes: 0,
+        totalBytes: parsedHeader.payloadSizeBytes,
+        speedBytesPerSec: 0,
+        state: TransferTaskState.running,
+      );
+      onTransferTaskUpdated?.call(_currentTask);
+
       socket.add(const [NetworkConstants.ctrlAccepted]);
       await socket.flush();
 
@@ -421,77 +535,80 @@ class SocketTransferService {
       outputFileSink = File(savedFilePath).openWrite();
 
       int receivedPayloadBytes = 0;
-      int lastProgressReportMs = 0;
+      int lastProgressReportMs = DateTime.now().millisecondsSinceEpoch;
+      int bytesAtLastReport = 0;
 
       if (parsedHeader.chunkedProtocol) {
-        // Ricezione a pacchetti frammentati con controllo di flusso
-        int chunksSinceLastAck = 0;
         while (receivedPayloadBytes < parsedHeader.payloadSizeBytes) {
-          final Uint8List chunkHeaderBytes = await reader.readExact(
-            8,
-            timeout: const Duration(seconds: 45),
-          );
-          final ByteData chunkHeader = ByteData.sublistView(chunkHeaderBytes);
-          final int chunkIndex = chunkHeader.getUint32(0, Endian.big);
-          final int chunkLength = chunkHeader.getUint32(4, Endian.big);
+          if (_isCancelled) {
+            throw const SocketException('Trasferimento annullato.');
+          }
+          await _waitWhilePaused();
 
-          if (chunkLength == 0 && chunkIndex == 0xFFFFFFFF) {
-            break; // Marker EOF
+          final int frameType = await reader.readByte();
+          if (frameType == NetworkConstants.ctrlPause) {
+            _handleRemoteControlByte(NetworkConstants.ctrlPause);
+            continue;
+          } else if (frameType == NetworkConstants.ctrlResume) {
+            _handleRemoteControlByte(NetworkConstants.ctrlResume);
+            continue;
+          } else if (frameType == NetworkConstants.ctrlCancel) {
+            _isCancelled = true;
+            throw const SocketException('Trasferimento annullato dal mittente.');
+          } else if (frameType == NetworkConstants.frameEof) {
+            break;
           }
 
-          final Uint8List fragmentData = await reader.readExact(
-            chunkLength,
-            timeout: const Duration(seconds: 45),
-          );
+          final Uint8List lenBytes = await reader.readExact(4);
+          final int chunkLength =
+              ByteData.sublistView(lenBytes).getUint32(0, Endian.big);
 
+          final Uint8List fragmentData = await reader.readExact(chunkLength);
           outputFileSink.add(fragmentData);
           receivedPayloadBytes += fragmentData.length;
-          chunksSinceLastAck++;
 
           final int nowMs = DateTime.now().millisecondsSinceEpoch;
-          if (nowMs - lastProgressReportMs > 80 ||
+          final int elapsedMs = nowMs - lastProgressReportMs;
+          if (elapsedMs >= 140 ||
               receivedPayloadBytes >= parsedHeader.payloadSizeBytes) {
+            final double speed = elapsedMs > 0
+                ? ((receivedPayloadBytes - bytesAtLastReport) * 1000.0) /
+                    elapsedMs
+                : 0.0;
             lastProgressReportMs = nowMs;
-            _onIncomingProgress?.call(
-              parsedHeader.transferId,
-              receivedPayloadBytes,
-              parsedHeader.payloadSizeBytes,
-            );
-          }
+            bytesAtLastReport = receivedPayloadBytes;
 
-          // Ogni N frammenti (o a fine file), scarica su disco e invia ACK di finestra
-          if (chunksSinceLastAck >= NetworkConstants.ackWindowChunks ||
-              receivedPayloadBytes >= parsedHeader.payloadSizeBytes) {
-            await outputFileSink.flush();
-            socket.add(const [NetworkConstants.ctrlChunkWindowAck]);
-            await socket.flush();
-            chunksSinceLastAck = 0;
+            _currentTask = _currentTask?.copyWith(
+              transferredBytes: receivedPayloadBytes,
+              speedBytesPerSec: speed,
+            );
+            onTransferTaskUpdated?.call(_currentTask);
           }
         }
       } else {
-        // Retrocompatibilità con nodi non frammentati
         while (receivedPayloadBytes < parsedHeader.payloadSizeBytes) {
+          if (_isCancelled) {
+            throw const SocketException('Trasferimento annullato.');
+          }
           final int remaining =
               parsedHeader.payloadSizeBytes - receivedPayloadBytes;
           final int toRead =
               math.min(remaining, NetworkConstants.fileChunkSizeBytes);
-          final Uint8List data = await reader.readExact(
-            toRead,
-            timeout: const Duration(seconds: 45),
-          );
+          final Uint8List data = await reader.readExact(toRead);
           outputFileSink.add(data);
           receivedPayloadBytes += data.length;
-          _onIncomingProgress?.call(
-            parsedHeader.transferId,
-            receivedPayloadBytes,
-            parsedHeader.payloadSizeBytes,
+
+          _currentTask = _currentTask?.copyWith(
+            transferredBytes: receivedPayloadBytes,
           );
+          onTransferTaskUpdated?.call(_currentTask);
         }
       }
 
       await outputFileSink.flush();
       await outputFileSink.close();
       outputFileSink = null;
+      transferCompletedSuccessfully = true;
 
       _incomingMessagesController.add(
         P2PChatMessage(
@@ -511,20 +628,20 @@ class SocketTransferService {
       socket.add(const [NetworkConstants.ctrlTransferCompleteAck]);
       await socket.flush();
     } catch (_) {
-      // Se il trasferimento si interrompe a metà, rimuove il file parziale
-      if (outputFileSink != null) {
+      if (!transferCompletedSuccessfully && savedFilePath != null) {
         try {
-          await outputFileSink.close();
+          await outputFileSink?.close();
           outputFileSink = null;
-          if (savedFilePath != null) {
-            final File incomplete = File(savedFilePath);
-            if (await incomplete.exists()) {
-              await incomplete.delete();
-            }
+          final File incomplete = File(savedFilePath);
+          if (await incomplete.exists()) {
+            await incomplete.delete();
           }
         } catch (_) {}
       }
     } finally {
+      _activeTransferSocket = null;
+      _currentTask = null;
+      onTransferTaskUpdated?.call(null);
       try {
         await reader?.dispose();
       } catch (_) {}
@@ -547,7 +664,8 @@ class SocketTransferService {
     final String ext = dotIndex != -1 ? fileName.substring(dotIndex) : '';
     int counter = 1;
     while (File(candidate).existsSync()) {
-      candidate = '$dirPath${Platform.pathSeparator}${baseName}_($counter)$ext';
+      candidate =
+          '$dirPath${Platform.pathSeparator}${baseName}_($counter)$ext';
       counter++;
     }
     return candidate;
@@ -625,20 +743,17 @@ class SocketTransferService {
     );
   }
 
-  /// Invia un file suddividendolo in frammenti da 64 KB con attesa di autorizzazione
-  /// (per gli host non fidati) e controllo di flusso a finestra (per file di grandi dimensioni).
+  /// Invio file in streaming a 512 KB per pacchetto ad altissimo throughput,
+  /// con supporto bidirezionale a Pausa, Riprendi e Annulla.
   Future<P2PChatMessage> sendFileFragmented({
     required PeerNode targetPeer,
     required String fileName,
     required int totalBytes,
     String? localFilePath,
     Stream<List<int>>? fallbackStream,
-    ProgressCallback? onProgress,
   }) async {
     final String transferId = _uuid.v4();
     const int chunkSize = NetworkConstants.fileChunkSizeBytes;
-    final int totalChunks =
-        totalBytes == 0 ? 1 : ((totalBytes + chunkSize - 1) ~/ chunkSize);
 
     final TcpTransferHeader header = TcpTransferHeader(
       transferId: transferId,
@@ -653,15 +768,32 @@ class SocketTransferService {
       timestampMs: DateTime.now().millisecondsSinceEpoch,
       chunkedProtocol: true,
       chunkSize: chunkSize,
-      totalChunks: totalChunks,
     );
 
     final Socket socket = await _openSocketWithReverseFallback(targetPeer);
-    final _BufferedSocketReader reader = _BufferedSocketReader(socket);
+    final _BufferedSocketReader reader = _BufferedSocketReader(
+      socket,
+      onOutOfBandControlByte: _handleRemoteControlByte,
+    );
     RandomAccessFile? raf;
 
+    _activeTransferSocket = socket;
+    _isPaused = false;
+    _isCancelled = false;
+    _currentTask = ActiveTransferTask(
+      transferId: transferId,
+      fileName: fileName,
+      peerId: targetPeer.nodeId,
+      peerAlias: targetPeer.alias,
+      isOutgoing: true,
+      transferredBytes: 0,
+      totalBytes: totalBytes,
+      speedBytesPerSec: 0,
+      state: TransferTaskState.waitingApproval,
+    );
+    onTransferTaskUpdated?.call(_currentTask);
+
     try {
-      // 1. Invia l'Header del file e attende l'accettazione (fino a 90s se il destinatario deve cliccare Accetta)
       socket.add(header.toFramedHeaderBytes());
       await socket.flush();
 
@@ -675,45 +807,59 @@ class SocketTransferService {
         );
       }
 
+      // Abilita l'intercettazione immediata dei segnali PAUSE/RESUME/CANCEL dal destinatario
+      reader.interceptSingleControlBytes = true;
+      _currentTask = _currentTask?.copyWith(state: TransferTaskState.running);
+      onTransferTaskUpdated?.call(_currentTask);
+
       int sentBytes = 0;
-      int chunkIndex = 0;
-      int chunksInWindow = 0;
-      int lastProgressMs = 0;
+      int chunksSentSinceFlush = 0;
+      int lastProgressMs = DateTime.now().millisecondsSinceEpoch;
+      int bytesAtLastReport = 0;
 
       Future<void> sendSingleFragment(Uint8List payloadSlice) async {
-        final ByteData fHeader = ByteData(8)
-          ..setUint32(0, chunkIndex, Endian.big)
-          ..setUint32(4, payloadSlice.length, Endian.big);
+        if (_isCancelled) {
+          throw Exception('Trasferimento annullato.');
+        }
+        await _waitWhilePaused();
+        if (_isCancelled) {
+          throw Exception('Trasferimento annullato.');
+        }
+
+        final ByteData fHeader = ByteData(5)
+          ..setUint8(0, NetworkConstants.frameDataChunk)
+          ..setUint32(1, payloadSlice.length, Endian.big);
 
         socket.add(fHeader.buffer.asUint8List());
         socket.add(payloadSlice);
 
         sentBytes += payloadSlice.length;
-        chunkIndex++;
-        chunksInWindow++;
+        chunksSentSinceFlush++;
 
         final int nowMs = DateTime.now().millisecondsSinceEpoch;
-        if (nowMs - lastProgressMs > 80 || sentBytes >= totalBytes) {
+        final int elapsedMs = nowMs - lastProgressMs;
+        if (elapsedMs >= 140 || sentBytes >= totalBytes) {
+          final double speed = elapsedMs > 0
+              ? ((sentBytes - bytesAtLastReport) * 1000.0) / elapsedMs
+              : 0.0;
           lastProgressMs = nowMs;
-          onProgress?.call(transferId, sentBytes, totalBytes);
+          bytesAtLastReport = sentBytes;
+
+          _currentTask = _currentTask?.copyWith(
+            transferredBytes: sentBytes,
+            speedBytesPerSec: speed,
+          );
+          onTransferTaskUpdated?.call(_currentTask);
         }
 
-        if (chunksInWindow >= NetworkConstants.ackWindowChunks ||
+        // Flush del socket ogni 16 frammenti (8 MB) senza attendere ack round-trip
+        if (chunksSentSinceFlush >= NetworkConstants.socketFlushEveryChunks ||
             sentBytes >= totalBytes) {
           await socket.flush();
-          final int ack = await reader.readByte(
-            timeout: const Duration(seconds: 45),
-          );
-          if (ack != NetworkConstants.ctrlChunkWindowAck) {
-            throw const SocketException(
-              'Errore di sincronizzazione pacchetto durante il trasferimento.',
-            );
-          }
-          chunksInWindow = 0;
+          chunksSentSinceFlush = 0;
         }
       }
 
-      // 2. Lettura deterministica a blocchi da 64 KB tramite RandomAccessFile (ottimale per file enormi)
       if (localFilePath != null && File(localFilePath).existsSync()) {
         raf = await File(localFilePath).open(mode: FileMode.read);
         final Uint8List reusableBuffer = Uint8List(chunkSize);
@@ -727,7 +873,6 @@ class SocketTransferService {
           await sendSingleFragment(slice);
         }
       } else if (fallbackStream != null) {
-        // Fallback con risegmentazione esatta in blocchi da 64 KB
         final BytesBuilder accumulator = BytesBuilder(copy: false);
         await for (final List<int> rawChunk in fallbackStream) {
           accumulator.add(rawChunk);
@@ -748,15 +893,22 @@ class SocketTransferService {
         throw Exception('Sorgente file non disponibile.');
       }
 
-      // 3. Attende la conferma finale di salvataggio completato su disco
+      // Invia marker EOF e attende conferma finale di chiusura file
+      socket.add(const [NetworkConstants.frameEof]);
+      await socket.flush();
+
       final int finalAck = await reader.readByte(
-        timeout: const Duration(seconds: 30),
+        timeout: const Duration(seconds: 60),
       );
       if (finalAck != NetworkConstants.ctrlTransferCompleteAck) {
         throw const SocketException(
-            'Mancata conferma finale di salvataggio dal destinatario.');
+          'Trasferimento non confermato dal destinatario.',
+        );
       }
     } finally {
+      _activeTransferSocket = null;
+      _currentTask = null;
+      onTransferTaskUpdated?.call(null);
       try {
         await raf?.close();
       } catch (_) {}
@@ -785,7 +937,8 @@ class SocketTransferService {
       final Directory? downloads = await getDownloadsDirectory();
       if (downloads != null) return downloads;
     } else if (Platform.isAndroid) {
-      final Directory publicDownload = Directory('/storage/emulated/0/Download');
+      final Directory publicDownload =
+          Directory('/storage/emulated/0/Download');
       if (await publicDownload.exists()) {
         return publicDownload;
       }
