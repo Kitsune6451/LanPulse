@@ -8,6 +8,61 @@ enum TransferPayloadType {
   pullPending,
 }
 
+enum TransferTaskState {
+  waitingApproval,
+  running,
+  paused,
+  cancelled,
+  completed,
+  failed,
+}
+
+class ActiveTransferTask {
+  final String transferId;
+  final String fileName;
+  final String peerId;
+  final String peerAlias;
+  final bool isOutgoing;
+  final int transferredBytes;
+  final int totalBytes;
+  final double speedBytesPerSec;
+  final TransferTaskState state;
+
+  const ActiveTransferTask({
+    required this.transferId,
+    required this.fileName,
+    required this.peerId,
+    required this.peerAlias,
+    required this.isOutgoing,
+    required this.transferredBytes,
+    required this.totalBytes,
+    required this.speedBytesPerSec,
+    required this.state,
+  });
+
+  double get progress => totalBytes > 0
+      ? (transferredBytes / totalBytes).clamp(0.0, 1.0)
+      : 0.0;
+
+  ActiveTransferTask copyWith({
+    int? transferredBytes,
+    double? speedBytesPerSec,
+    TransferTaskState? state,
+  }) {
+    return ActiveTransferTask(
+      transferId: transferId,
+      fileName: fileName,
+      peerId: peerId,
+      peerAlias: peerAlias,
+      isOutgoing: isOutgoing,
+      transferredBytes: transferredBytes ?? this.transferredBytes,
+      totalBytes: totalBytes,
+      speedBytesPerSec: speedBytesPerSec ?? this.speedBytesPerSec,
+      state: state ?? this.state,
+    );
+  }
+}
+
 class TcpTransferHeader {
   final String transferId;
   final TransferPayloadType type;
@@ -23,7 +78,6 @@ class TcpTransferHeader {
   final int timestampMs;
   final bool chunkedProtocol;
   final int chunkSize;
-  final int totalChunks;
 
   const TcpTransferHeader({
     required this.transferId,
@@ -39,8 +93,7 @@ class TcpTransferHeader {
     this.fileName,
     this.sha256Checksum,
     this.chunkedProtocol = true,
-    this.chunkSize = 65536,
-    this.totalChunks = 0,
+    this.chunkSize = 524288,
   });
 
   Map<String, dynamic> toMap() => {
@@ -58,7 +111,6 @@ class TcpTransferHeader {
         'timestampMs': timestampMs,
         'chunkedProtocol': chunkedProtocol,
         'chunkSize': chunkSize,
-        'totalChunks': totalChunks,
       };
 
   factory TcpTransferHeader.fromMap(Map<String, dynamic> map) {
@@ -85,8 +137,7 @@ class TcpTransferHeader {
       timestampMs: (map['timestampMs'] as num?)?.toInt() ??
           DateTime.now().millisecondsSinceEpoch,
       chunkedProtocol: map['chunkedProtocol'] as bool? ?? false,
-      chunkSize: (map['chunkSize'] as num?)?.toInt() ?? 65536,
-      totalChunks: (map['totalChunks'] as num?)?.toInt() ?? 0,
+      chunkSize: (map['chunkSize'] as num?)?.toInt() ?? 524288,
     );
   }
 
