@@ -9,7 +9,7 @@ import '../../models/p2p_packet.dart';
 import '../../models/peer_node.dart';
 import '../../providers/p2p_controller.dart';
 
-enum LeftSidebarTab { allPeers, savedContacts, chats, fileHistory }
+enum AppSection { radar, chats, vault, style }
 
 class AdaptiveHomeScreen extends StatefulWidget {
   const AdaptiveHomeScreen({super.key});
@@ -19,24 +19,14 @@ class AdaptiveHomeScreen extends StatefulWidget {
 }
 
 class _AdaptiveHomeScreenState extends State<AdaptiveHomeScreen> {
-  LeftSidebarTab _activeTab = LeftSidebarTab.allPeers;
-  String _historyFilter = 'sent'; // 'sent', 'received', 'all'
+  AppSection _section = AppSection.radar;
+  bool _onlyTrustedFilter = false;
+  String _vaultFilter = 'all'; // 'all', 'sent', 'received'
   final TextEditingController _msgController = TextEditingController();
-  final Map<String, ScrollController> _chatScrollControllers = {};
-
-  ScrollController _scrollControllerForPeer(String peerId) {
-    return _chatScrollControllers.putIfAbsent(
-      peerId,
-      () => ScrollController(),
-    );
-  }
 
   @override
   void dispose() {
     _msgController.dispose();
-    for (final c in _chatScrollControllers.values) {
-      c.dispose();
-    }
     super.dispose();
   }
 
@@ -49,7 +39,7 @@ class _AdaptiveHomeScreenState extends State<AdaptiveHomeScreen> {
       size /= 1024;
       i++;
     }
-    return '${size.toStringAsFixed(i == 0 ? 0 : 2)} ${suffixes[i]}';
+    return '${size.toStringAsFixed(i == 0 ? 0 : 1)} ${suffixes[i]}';
   }
 
   bool _isImageFile(String name) {
@@ -102,7 +92,8 @@ class _AdaptiveHomeScreenState extends State<AdaptiveHomeScreen> {
     if (filePath == null || !File(filePath).existsSync()) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Il file locale non è più presente sul disco.'),
+          content: Text('File non trovato sul disco locale.'),
+          behavior: SnackBarBehavior.floating,
         ),
       );
       return;
@@ -124,213 +115,316 @@ class _AdaptiveHomeScreenState extends State<AdaptiveHomeScreen> {
   @override
   Widget build(BuildContext context) {
     final controller = context.watch<P2PController>();
-    final bool isWide = MediaQuery.of(context).size.width >= 820;
+    final bool isDesktop = MediaQuery.of(context).size.width >= 860;
+
+    // Su Mobile, se un peer è selezionato, apriamo la vista Chat pulita a tutto schermo
+    if (!isDesktop && controller.selectedPeer != null) {
+      return Scaffold(
+        body: SafeArea(
+          child: Column(
+            children: [
+              _buildIncomingRequestOverlay(context, controller),
+              if (controller.isTransferring)
+                LinearProgressIndicator(
+                  value: controller.activeTransferProgress > 0
+                      ? controller.activeTransferProgress
+                      : null,
+                  minHeight: 3,
+                ),
+              Expanded(
+                child: _buildChatStage(
+                  context,
+                  controller,
+                  isMobileFullScreen: true,
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
 
     return Scaffold(
-      appBar: AppBar(
-        title: Row(
-          children: [
-            const Icon(Icons.radar_rounded),
-            const SizedBox(width: 10),
-            Flexible(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'LanPulse P2P • ${controller.localAlias}',
-                    style: const TextStyle(
-                      fontSize: 16,
-                      fontWeight: FontWeight.bold,
-                    ),
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  Text(
-                    'IP Wi-Fi: ${controller.localIp ?? "Ricerca rete..."} : ${controller.tcpPort}',
-                    style: TextStyle(
-                      fontSize: 11.5,
-                      color: Theme.of(context).colorScheme.primary,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
-        actions: [
-          IconButton(
-            tooltip: 'Aggiungi Host via IP',
-            icon: const Icon(Icons.add_link_rounded),
-            onPressed: () => _showConnectByIpDialog(context, controller),
-          ),
-          IconButton(
-            tooltip: 'Scansiona Rete Wi-Fi',
-            icon: controller.isScanningWifi
-                ? const SizedBox(
-                    width: 18,
-                    height: 18,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Icon(Icons.refresh_rounded),
-            onPressed:
-                controller.isScanningWifi ? null : controller.refreshNetwork,
-          ),
-          IconButton(
-            tooltip: 'Temi, Stili e Login Google',
-            icon: const Icon(Icons.palette_outlined),
-            onPressed: () => _showSettingsAndThemesSheet(context, controller),
-          ),
-        ],
-      ),
+      appBar: _buildMinimalHeader(context, controller),
       body: Column(
         children: [
-          // Banner notifiche di stato o errori
-          if (controller.errorBanner != null)
-            MaterialBanner(
-              backgroundColor: controller.isBannerError
-                  ? Colors.red.withValues(alpha: 0.15)
-                  : Theme.of(context).colorScheme.primaryContainer,
-              content: Text(controller.errorBanner!),
-              leading: Icon(
-                controller.isBannerError
-                    ? Icons.error_outline
-                    : Icons.info_outline,
-              ),
-              actions: [
-                TextButton(
-                  onPressed: controller.clearError,
-                  child: const Text('CHIUDI'),
-                ),
-              ],
-            ),
-
-          // Richieste MANDATORIE di ricezione file in entrata (per gli host non fidati)
-          for (final reqItem in controller.pendingFileRequests)
-            _buildMandatoryFileRequestBanner(context, controller, reqItem),
-
-          // Barra progresso trasferimento attivo
+          _buildStatusToast(context, controller),
+          _buildIncomingRequestOverlay(context, controller),
           if (controller.isTransferring)
             LinearProgressIndicator(
               value: controller.activeTransferProgress > 0
                   ? controller.activeTransferProgress
                   : null,
-              minHeight: 5,
+              minHeight: 3,
             ),
-
-          // Barra rapida per scorrere le DIVERSE chat aperte/salvate
-          if (controller.activeChatPeers.isNotEmpty)
-            _buildChatSwitcherBar(context, controller),
-
-          // Contenuto principale
           Expanded(
-            child: isWide
-                ? Row(
-                    children: [
-                      SizedBox(
-                        width: 340,
-                        child: _buildSidebar(context, controller),
+            child: isDesktop
+                ? _buildDesktopWorkspace(context, controller)
+                : AnimatedSwitcher(
+                    duration: const Duration(milliseconds: 240),
+                    switchInCurve: Curves.easeOutCubic,
+                    child: _buildMobileSectionBody(context, controller),
+                  ),
+          ),
+        ],
+      ),
+      bottomNavigationBar: isDesktop
+          ? null
+          : NavigationBar(
+              selectedIndex: _section.index,
+              onDestinationSelected: (idx) {
+                setState(() => _section = AppSection.values[idx]);
+              },
+              destinations: [
+                NavigationDestination(
+                  icon: const Icon(Icons.radar_rounded),
+                  selectedIcon: const Icon(Icons.radar_rounded),
+                  label: 'Radar (${controller.peers.length})',
+                ),
+                NavigationDestination(
+                  icon: Badge(
+                    isLabelVisible: controller.totalUnreadCount > 0,
+                    label: Text('${controller.totalUnreadCount}'),
+                    child: const Icon(Icons.chat_bubble_outline_rounded),
+                  ),
+                  selectedIcon: const Icon(Icons.chat_bubble_rounded),
+                  label: 'Chat',
+                ),
+                NavigationDestination(
+                  icon: const Icon(Icons.folder_copy_outlined),
+                  selectedIcon: const Icon(Icons.folder_copy_rounded),
+                  label: 'Archivio',
+                ),
+                const NavigationDestination(
+                  icon: Icon(Icons.tune_rounded),
+                  selectedIcon: Icon(Icons.tune_rounded),
+                  label: 'Stile',
+                ),
+              ],
+            ),
+    );
+  }
+
+  PreferredSizeWidget _buildMinimalHeader(
+    BuildContext context,
+    P2PController controller,
+  ) {
+    final Color accent = Theme.of(context).colorScheme.primary;
+    return AppBar(
+      title: Row(
+        children: [
+          Container(
+            width: 34,
+            height: 34,
+            decoration: BoxDecoration(
+              color: accent.withValues(alpha: 0.14),
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: Icon(Icons.bolt_rounded, color: accent, size: 20),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  controller.localAlias,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                Row(
+                  children: [
+                    Container(
+                      width: 7,
+                      height: 7,
+                      decoration: BoxDecoration(
+                        color: controller.localIp != null
+                            ? const Color(0xFF10B981)
+                            : Colors.amber,
+                        shape: BoxShape.circle,
                       ),
-                      const VerticalDivider(width: 1),
-                      Expanded(
-                        child: _activeTab == LeftSidebarTab.fileHistory
-                            ? _buildFileHistoryView(context, controller)
-                            : _buildChatArea(context, controller),
+                    ),
+                    const SizedBox(width: 6),
+                    Text(
+                      controller.localIp ?? 'Rete offline',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontFamily: 'monospace',
+                        fontWeight: FontWeight.w500,
+                        color: Theme.of(context)
+                            .textTheme
+                            .bodySmall
+                            ?.color
+                            ?.withValues(alpha: 0.7),
                       ),
-                    ],
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+      actions: [
+        IconButton(
+          tooltip: 'Connessione diretta IP',
+          icon: const Icon(Icons.add_link_rounded, size: 22),
+          onPressed: () => _showConnectByIpModal(context, controller),
+        ),
+        Padding(
+          padding: const EdgeInsets.only(right: 8.0),
+          child: IconButton(
+            tooltip: 'Aggiorna radar Wi-Fi',
+            icon: controller.isScanningWifi
+                ? SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: accent,
+                    ),
                   )
-                : (_activeTab == LeftSidebarTab.fileHistory
-                    ? Column(
-                        children: [
-                          _buildMobileTopTabs(controller),
-                          Expanded(
-                            child: _buildFileHistoryView(context, controller),
-                          ),
-                        ],
-                      )
-                    : (controller.selectedPeer == null
-                        ? Column(
-                            children: [
-                              _buildMobileTopTabs(controller),
-                              Expanded(
-                                child: _buildSidebar(context, controller),
-                              ),
-                            ],
-                          )
-                        : _buildChatArea(context, controller, isMobile: true))),
+                : const Icon(Icons.sync_rounded, size: 22),
+            onPressed:
+                controller.isScanningWifi ? null : controller.refreshNetwork,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildStatusToast(BuildContext context, P2PController controller) {
+    if (controller.errorBanner == null) return const SizedBox.shrink();
+    final Color color = controller.isBannerError
+        ? const Color(0xFFEF4444)
+        : Theme.of(context).colorScheme.primary;
+
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: color.withValues(alpha: 0.3)),
+      ),
+      child: Row(
+        children: [
+          Icon(
+            controller.isBannerError
+                ? Icons.warning_amber_rounded
+                : Icons.info_outline_rounded,
+            size: 18,
+            color: color,
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              controller.errorBanner!,
+              style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500),
+            ),
+          ),
+          IconButton(
+            visualDensity: VisualDensity.compact,
+            icon: const Icon(Icons.close_rounded, size: 16),
+            onPressed: controller.clearError,
           ),
         ],
       ),
     );
   }
 
-  /// Banner interattivo obbligatorio quando un host NON fidato chiede di inviare un file
-  Widget _buildMandatoryFileRequestBanner(
+  /// Card Fintech per le richieste MANDATORIE di invio file da host non fidati
+  Widget _buildIncomingRequestOverlay(
     BuildContext context,
     P2PController controller,
-    PendingRequestItem item,
   ) {
+    if (controller.pendingFileRequests.isEmpty) return const SizedBox.shrink();
+    final item = controller.pendingFileRequests.first;
     final req = item.request;
+    final Color accent = Theme.of(context).colorScheme.primary;
+
     return Container(
-      width: double.infinity,
-      margin: const EdgeInsets.fromLTRB(12, 8, 12, 4),
-      padding: const EdgeInsets.all(14),
+      margin: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+      padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: Theme.of(context).colorScheme.tertiaryContainer,
+        color: Theme.of(context).cardTheme.color,
         borderRadius:
             BorderRadius.circular(controller.uiStyle.borderRadius),
-        border: Border.all(
-          color: Theme.of(context).colorScheme.tertiary,
-          width: 1.5,
-        ),
+        border: Border.all(color: accent, width: 1.5),
+        boxShadow: [
+          BoxShadow(
+            color: accent.withValues(alpha: 0.15),
+            blurRadius: 20,
+            offset: const Offset(0, 6),
+          ),
+        ],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
             children: [
-              const Icon(Icons.notifications_active_rounded, size: 22),
-              const SizedBox(width: 8),
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: accent.withValues(alpha: 0.15),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Icon(
+                  Icons.file_download_outlined,
+                  color: accent,
+                  size: 20,
+                ),
+              ),
+              const SizedBox(width: 12),
               Expanded(
-                child: Text(
-                  'Richiesta di invio file da ${req.senderAlias} (${req.senderIp})',
-                  style: const TextStyle(
-                    fontWeight: FontWeight.bold,
-                    fontSize: 14.5,
-                  ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Richiesta da ${req.senderAlias}',
+                      style: const TextStyle(
+                        fontWeight: FontWeight.w700,
+                        fontSize: 14.5,
+                      ),
+                    ),
+                    Text(
+                      '${req.fileName} • ${_formatBytes(req.fileSizeBytes)}',
+                      style: TextStyle(
+                        fontSize: 12.5,
+                        color: Theme.of(context)
+                            .textTheme
+                            .bodySmall
+                            ?.color
+                            ?.withValues(alpha: 0.75),
+                      ),
+                    ),
+                  ],
                 ),
               ),
             ],
           ),
-          const SizedBox(height: 6),
-          Text(
-            'File: "${req.fileName}" • Dimensione: ${_formatBytes(req.fileSizeBytes)}',
-            style: const TextStyle(fontSize: 13),
-          ),
-          const SizedBox(height: 10),
+          const SizedBox(height: 14),
           Wrap(
             spacing: 8,
             runSpacing: 8,
             alignment: WrapAlignment.end,
             children: [
-              OutlinedButton.icon(
-                icon: const Icon(Icons.close_rounded, size: 18),
-                label: const Text('Rifiuta'),
-                onPressed: () => controller.respondToFileRequest(
-                  item,
-                  accept: false,
-                ),
+              TextButton(
+                onPressed: () =>
+                    controller.respondToFileRequest(item, accept: false),
+                child: const Text('Rifiuta'),
               ),
-              FilledButton.tonalIcon(
-                icon: const Icon(Icons.check_rounded, size: 18),
-                label: const Text('Accetta questa volta'),
+              OutlinedButton(
                 onPressed: () => controller.respondToFileRequest(
                   item,
                   accept: true,
                   trustSender: false,
                 ),
+                child: const Text('Accetta'),
               ),
               FilledButton.icon(
-                icon: const Icon(Icons.verified_user_rounded, size: 18),
-                label: const Text('Accetta e Salva come Fidato'),
+                icon: const Icon(Icons.verified_outlined, size: 16),
+                label: const Text('Accetta e Fidati'),
                 onPressed: () => controller.respondToFileRequest(
                   item,
                   accept: true,
@@ -344,276 +438,128 @@ class _AdaptiveHomeScreenState extends State<AdaptiveHomeScreen> {
     );
   }
 
-  /// Barra orizzontale per scorrere rapidamente le diverse chat attive e salvate
-  Widget _buildChatSwitcherBar(
+  /// Layout Desktop a 3 colonne (NavigationRail + Lista Contestuale + Stage)
+  Widget _buildDesktopWorkspace(
     BuildContext context,
     P2PController controller,
   ) {
-    final chats = controller.activeChatPeers;
-    return Container(
-      height: 50,
-      padding: const EdgeInsets.symmetric(horizontal: 8),
-      decoration: BoxDecoration(
-        border: Border(
-          bottom: BorderSide(
-            color: Theme.of(context).dividerColor.withValues(alpha: 0.2),
-          ),
-        ),
-      ),
-      child: Row(
-        children: [
-          IconButton(
-            tooltip: 'Chat precedente',
-            icon: const Icon(Icons.chevron_left_rounded),
-            onPressed: () => controller.cycleActiveChat(-1),
-          ),
-          Expanded(
-            child: ListView.separated(
-              scrollDirection: Axis.horizontal,
-              itemCount: chats.length,
-              separatorBuilder: (_, __) => const SizedBox(width: 6),
-              itemBuilder: (context, index) {
-                final peer = chats[index];
-                final bool isSelected =
-                    controller.selectedPeer?.nodeId == peer.nodeId;
-                final int unread = controller.unreadCountForPeer(peer.nodeId);
-
-                return Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 6),
-                  child: ChoiceChip(
-                    selected: isSelected,
-                    onSelected: (_) {
-                      setState(() {
-                        if (_activeTab == LeftSidebarTab.fileHistory) {
-                          _activeTab = LeftSidebarTab.chats;
-                        }
-                      });
-                      controller.selectPeer(peer);
-                    },
-                    avatar: Icon(
-                      peer.isTrusted ? Icons.star_rounded : Icons.chat_bubble,
-                      size: 16,
-                      color: peer.isOnline ? Colors.greenAccent : Colors.grey,
-                    ),
-                    label: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(peer.alias),
-                        if (unread > 0) ...[
-                          const SizedBox(width: 6),
-                          CircleAvatar(
-                            radius: 9,
-                            backgroundColor:
-                                Theme.of(context).colorScheme.error,
-                            child: Text(
-                              '$unread',
-                              style: const TextStyle(
-                                fontSize: 10,
-                                color: Colors.white,
-                              ),
-                            ),
-                          ),
-                        ],
-                      ],
-                    ),
-                  ),
-                );
-              },
+    return Row(
+      children: [
+        NavigationRail(
+          selectedIndex: _section.index,
+          onDestinationSelected: (idx) {
+            setState(() => _section = AppSection.values[idx]);
+          },
+          labelType: NavigationRailLabelType.all,
+          destinations: [
+            const NavigationRailDestination(
+              icon: Icon(Icons.radar_rounded),
+              label: Text('Radar'),
             ),
+            NavigationRailDestination(
+              icon: Badge(
+                isLabelVisible: controller.totalUnreadCount > 0,
+                label: Text('${controller.totalUnreadCount}'),
+                child: const Icon(Icons.chat_bubble_outline_rounded),
+              ),
+              selectedIcon: const Icon(Icons.chat_bubble_rounded),
+              label: const Text('Chat'),
+            ),
+            const NavigationRailDestination(
+              icon: Icon(Icons.folder_copy_outlined),
+              selectedIcon: Icon(Icons.folder_copy_rounded),
+              label: Text('Archivio'),
+            ),
+            const NavigationRailDestination(
+              icon: Icon(Icons.tune_rounded),
+              label: Text('Stile'),
+            ),
+          ],
+        ),
+        const VerticalDivider(width: 1),
+        if (_section == AppSection.radar || _section == AppSection.chats) ...[
+          SizedBox(
+            width: 330,
+            child: _section == AppSection.radar
+                ? _buildRadarList(context, controller)
+                : _buildChatsList(context, controller),
           ),
-          IconButton(
-            tooltip: 'Chat successiva',
-            icon: const Icon(Icons.chevron_right_rounded),
-            onPressed: () => controller.cycleActiveChat(1),
-          ),
-        ],
-      ),
+          const VerticalDivider(width: 1),
+          Expanded(child: _buildChatStage(context, controller)),
+        ] else if (_section == AppSection.vault)
+          Expanded(child: _buildVaultStage(context, controller))
+        else
+          Expanded(child: _buildStyleStage(context, controller)),
+      ],
     );
   }
 
-  Widget _buildMobileTopTabs(P2PController controller) {
-    return Padding(
-      padding: const EdgeInsets.all(8.0),
-      child: SegmentedButton<LeftSidebarTab>(
-        segments: [
-          const ButtonSegment(
-            value: LeftSidebarTab.allPeers,
-            icon: Icon(Icons.wifi_tethering, size: 18),
-            label: Text('Nodi'),
-          ),
-          const ButtonSegment(
-            value: LeftSidebarTab.savedContacts,
-            icon: Icon(Icons.star_rounded, size: 18),
-            label: Text('Contatti'),
-          ),
-          const ButtonSegment(
-            value: LeftSidebarTab.chats,
-            icon: Icon(Icons.forum_outlined, size: 18),
-            label: Text('Chat'),
-          ),
-          ButtonSegment(
-            value: LeftSidebarTab.fileHistory,
-            icon: const Icon(Icons.history_rounded, size: 18),
-            label: Text('File (${controller.fileHistory.length})'),
-          ),
-        ],
-        selected: {_activeTab},
-        onSelectionChanged: (s) => setState(() => _activeTab = s.first),
-      ),
-    );
-  }
-
-  Widget _buildSidebar(BuildContext context, P2PController controller) {
-    final List<PeerNode> displayedPeers = switch (_activeTab) {
-      LeftSidebarTab.savedContacts => controller.savedContactsList,
-      LeftSidebarTab.chats => controller.activeChatPeers,
-      _ => controller.peers,
+  Widget _buildMobileSectionBody(
+    BuildContext context,
+    P2PController controller,
+  ) {
+    return switch (_section) {
+      AppSection.radar => _buildRadarList(context, controller),
+      AppSection.chats => _buildChatsList(context, controller),
+      AppSection.vault => _buildVaultStage(context, controller),
+      AppSection.style => _buildStyleStage(context, controller),
     };
+  }
+
+  /// Sezione 1: Radar Nodi e Contatti Fidati
+  Widget _buildRadarList(BuildContext context, P2PController controller) {
+    final List<PeerNode> list = _onlyTrustedFilter
+        ? controller.savedContactsList
+        : controller.peers;
 
     return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Padding(
-          padding: const EdgeInsets.all(10),
-          child: Wrap(
-            spacing: 6,
-            runSpacing: 6,
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+          child: Row(
             children: [
-              ChoiceChip(
-                label: const Text('Rete'),
-                selected: _activeTab == LeftSidebarTab.allPeers,
-                onSelected: (_) =>
-                    setState(() => _activeTab = LeftSidebarTab.allPeers),
-              ),
-              ChoiceChip(
-                label: Text('Contatti (${controller.savedContactsList.length})'),
-                selected: _activeTab == LeftSidebarTab.savedContacts,
-                onSelected: (_) =>
-                    setState(() => _activeTab = LeftSidebarTab.savedContacts),
-              ),
-              ChoiceChip(
-                label: Text('Chat (${controller.activeChatPeers.length})'),
-                selected: _activeTab == LeftSidebarTab.chats,
-                onSelected: (_) =>
-                    setState(() => _activeTab = LeftSidebarTab.chats),
-              ),
-              ChoiceChip(
-                label: Text('Cronologia (${controller.fileHistory.length})'),
-                selected: _activeTab == LeftSidebarTab.fileHistory,
-                onSelected: (_) =>
-                    setState(() => _activeTab = LeftSidebarTab.fileHistory),
+              Expanded(
+                child: SegmentedButton<bool>(
+                  showSelectedIcon: false,
+                  segments: [
+                    ButtonSegment(
+                      value: false,
+                      label: Text('Tutti (${controller.peers.length})'),
+                    ),
+                    ButtonSegment(
+                      value: true,
+                      label: Text(
+                        'Fidati (${controller.savedContactsList.length})',
+                      ),
+                    ),
+                  ],
+                  selected: {_onlyTrustedFilter},
+                  onSelectionChanged: (s) =>
+                      setState(() => _onlyTrustedFilter = s.first),
+                ),
               ),
             ],
           ),
         ),
-        const Divider(height: 1),
         Expanded(
-          child: displayedPeers.isEmpty
-              ? Center(
-                  child: Padding(
-                    padding: const EdgeInsets.all(24.0),
-                    child: Text(
-                      _activeTab == LeftSidebarTab.savedContacts
-                          ? 'Nessun contatto salvato.\nClicca sulla stella accanto a un host per salvarlo e rendere la chat permanente.'
-                          : 'Nessun nodo rilevato.\nAssicurati di essere sulla stessa rete Wi-Fi o aggiungi un IP manualmente.',
-                      textAlign: TextAlign.center,
-                    ),
-                  ),
+          child: list.isEmpty
+              ? _buildEmptyState(
+                  icon: Icons.sensors_off_rounded,
+                  title: _onlyTrustedFilter
+                      ? 'Nessun contatto fidato'
+                      : 'Ricerca nodi sulla LAN...',
+                  subtitle: _onlyTrustedFilter
+                      ? 'Tocca l\'icona segnalibro su qualsiasi host per salvarlo permanentemente.'
+                      : 'Assicurati che i dispositivi siano sotto la stessa rete Wi-Fi o aggiungi un IP.',
                 )
-              : ListView.builder(
-                  itemCount: displayedPeers.length,
-                  itemBuilder: (context, idx) {
-                    final peer = displayedPeers[idx];
-                    final isSelected =
-                        controller.selectedPeer?.nodeId == peer.nodeId;
-                    final lastMsg = controller.lastMessageForPeer(peer.nodeId);
-                    final unread = controller.unreadCountForPeer(peer.nodeId);
-
-                    return ListTile(
-                      selected: isSelected,
-                      leading: Stack(
-                        children: [
-                          CircleAvatar(
-                            child: Icon(
-                              peer.platform == PeerPlatform.windows
-                                  ? Icons.desktop_windows_rounded
-                                  : Icons.smartphone_rounded,
-                            ),
-                          ),
-                          Positioned(
-                            right: 0,
-                            bottom: 0,
-                            child: Container(
-                              width: 11,
-                              height: 11,
-                              decoration: BoxDecoration(
-                                color: peer.isOnline
-                                    ? Colors.greenAccent
-                                    : Colors.grey,
-                                shape: BoxShape.circle,
-                                border:
-                                    Border.all(color: Colors.black, width: 1.5),
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                      title: Row(
-                        children: [
-                          Expanded(
-                            child: Text(
-                              peer.alias,
-                              overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                          ),
-                          if (unread > 0)
-                            Container(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 7,
-                                vertical: 2,
-                              ),
-                              decoration: BoxDecoration(
-                                color: Theme.of(context).colorScheme.primary,
-                                borderRadius: BorderRadius.circular(10),
-                              ),
-                              child: Text(
-                                '$unread',
-                                style: const TextStyle(
-                                  fontSize: 11,
-                                  color: Colors.white,
-                                ),
-                              ),
-                            ),
-                        ],
-                      ),
-                      subtitle: Text(
-                        lastMsg != null
-                            ? '${lastMsg.isOutgoing ? "Tu: " : ""}${lastMsg.content}'
-                            : '${peer.ipAddress} • ${peer.isOnline ? "Online" : "Offline (Chat salvata)"}',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                      trailing: IconButton(
-                        tooltip: peer.isTrusted
-                            ? 'Rimuovi dai Contatti Fidati'
-                            : 'Salva come Contatto Fidato (Chat permanente)',
-                        icon: Icon(
-                          peer.isTrusted
-                              ? Icons.star_rounded
-                              : Icons.star_border_rounded,
-                          color: peer.isTrusted ? Colors.amber : null,
-                        ),
-                        onPressed: () => controller.toggleSaveContact(peer),
-                      ),
-                      onTap: () {
-                        if (_activeTab == LeftSidebarTab.fileHistory) {
-                          setState(() => _activeTab = LeftSidebarTab.chats);
-                        }
-                        controller.selectPeer(peer);
-                      },
-                    );
+              : ListView.separated(
+                  padding: const EdgeInsets.all(14),
+                  itemCount: list.length,
+                  separatorBuilder: (_, __) => const SizedBox(height: 8),
+                  itemBuilder: (context, index) {
+                    final peer = list[index];
+                    return _buildPeerCard(context, controller, peer);
                   },
                 ),
         ),
@@ -621,12 +567,514 @@ class _AdaptiveHomeScreenState extends State<AdaptiveHomeScreen> {
     );
   }
 
-  /// Vista della Cronologia dei File Mandati e Ricevuti
-  Widget _buildFileHistoryView(
+  /// Sezione 2: Lista Conversazioni Attive e Permanenti
+  Widget _buildChatsList(BuildContext context, P2PController controller) {
+    final chats = controller.activeChatPeers;
+    if (chats.isEmpty) {
+      return _buildEmptyState(
+        icon: Icons.chat_bubble_outline_rounded,
+        title: 'Nessuna conversazione attiva',
+        subtitle:
+            'Seleziona un nodo dal Radar per inviare messaggi o file ad alta velocità.',
+      );
+    }
+
+    return ListView.separated(
+      padding: const EdgeInsets.all(14),
+      itemCount: chats.length,
+      separatorBuilder: (_, __) => const SizedBox(height: 8),
+      itemBuilder: (context, index) {
+        final peer = chats[index];
+        return _buildPeerCard(context, controller, peer, showLastMessage: true);
+      },
+    );
+  }
+
+  Widget _buildPeerCard(
     BuildContext context,
     P2PController controller,
+    PeerNode peer, {
+    bool showLastMessage = false,
+  }) {
+    final bool isSelected = controller.selectedPeer?.nodeId == peer.nodeId;
+    final P2PChatMessage? lastMsg = controller.lastMessageForPeer(peer.nodeId);
+    final int unread = controller.unreadCountForPeer(peer.nodeId);
+    final Color accent = Theme.of(context).colorScheme.primary;
+
+    return Card(
+      color: isSelected ? accent.withValues(alpha: 0.10) : null,
+      child: InkWell(
+        borderRadius:
+            BorderRadius.circular(controller.uiStyle.borderRadius),
+        onTap: () => controller.selectPeer(peer),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+          child: Row(
+            children: [
+              Stack(
+                children: [
+                  Container(
+                    width: 44,
+                    height: 44,
+                    decoration: BoxDecoration(
+                      color: accent.withValues(alpha: 0.12),
+                      borderRadius: BorderRadius.circular(13),
+                    ),
+                    child: Icon(
+                      peer.platform == PeerPlatform.windows
+                          ? Icons.laptop_mac_rounded
+                          : Icons.phone_android_rounded,
+                      color: accent,
+                      size: 22,
+                    ),
+                  ),
+                  Positioned(
+                    right: 0,
+                    bottom: 0,
+                    child: Container(
+                      width: 11,
+                      height: 11,
+                      decoration: BoxDecoration(
+                        color: peer.isOnline
+                            ? const Color(0xFF10B981)
+                            : Colors.grey,
+                        shape: BoxShape.circle,
+                        border: Border.all(
+                          color: Theme.of(context).scaffoldBackgroundColor,
+                          width: 2,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Flexible(
+                          child: Text(
+                            peer.alias,
+                            style: const TextStyle(
+                              fontWeight: FontWeight.w700,
+                              fontSize: 15,
+                            ),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        if (peer.isTrusted) ...[
+                          const SizedBox(width: 6),
+                          Icon(
+                            Icons.verified_rounded,
+                            size: 15,
+                            color: accent,
+                          ),
+                        ],
+                      ],
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      showLastMessage && lastMsg != null
+                          ? '${lastMsg.isOutgoing ? "Tu: " : ""}${lastMsg.content}'
+                          : '${peer.ipAddress} • ${peer.isOnline ? "Online" : "Salvato"}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 12.5,
+                        color: Theme.of(context)
+                            .textTheme
+                            .bodySmall
+                            ?.color
+                            ?.withValues(alpha: 0.7),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              if (unread > 0)
+                Container(
+                  margin: const EdgeInsets.only(right: 6),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 3,
+                  ),
+                  decoration: BoxDecoration(
+                    color: accent,
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  child: Text(
+                    '$unread',
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 11,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+              IconButton(
+                visualDensity: VisualDensity.compact,
+                tooltip: peer.isTrusted
+                    ? 'Rimuovi dai contatti fidati'
+                    : 'Salva come contatto fidato',
+                icon: Icon(
+                  peer.isTrusted
+                      ? Icons.bookmark_rounded
+                      : Icons.bookmark_border_rounded,
+                  size: 20,
+                  color: peer.isTrusted ? accent : null,
+                ),
+                onPressed: () => controller.toggleSaveContact(peer),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Stage della Chat (con selettore rapido per scorrere le diverse chat senza ridondanza)
+  Widget _buildChatStage(
+    BuildContext context,
+    P2PController controller, {
+    bool isMobileFullScreen = false,
+  }) {
+    final PeerNode? peer = controller.selectedPeer;
+    if (peer == null) {
+      return _buildEmptyState(
+        icon: Icons.bolt_rounded,
+        title: 'Nessun nodo selezionato',
+        subtitle:
+            'Scegli un dispositivo dalla lista laterale per iniziare a condividere file o messaggi.',
+      );
+    }
+
+    final messages = controller.messagesForSelectedPeer;
+    final allChats = controller.activeChatPeers;
+    final Color accent = Theme.of(context).colorScheme.primary;
+
+    return GestureDetector(
+      onHorizontalDragEnd: (details) {
+        if (details.primaryVelocity == null) return;
+        if (details.primaryVelocity! < -450) {
+          controller.cycleActiveChat(1);
+        } else if (details.primaryVelocity! > 450) {
+          controller.cycleActiveChat(-1);
+        }
+      },
+      child: Column(
+        children: [
+          // Top Bar minimale della Chat
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            decoration: BoxDecoration(
+              border: Border(
+                bottom: BorderSide(
+                  color: Theme.of(context).dividerTheme.color ??
+                      Colors.transparent,
+                ),
+              ),
+            ),
+            child: Row(
+              children: [
+                if (isMobileFullScreen)
+                  IconButton(
+                    icon: const Icon(Icons.arrow_back_ios_new_rounded, size: 19),
+                    onPressed: () => controller.selectPeer(null),
+                  ),
+                Container(
+                  width: 9,
+                  height: 9,
+                  decoration: BoxDecoration(
+                    color: peer.isOnline
+                        ? const Color(0xFF10B981)
+                        : Colors.grey,
+                    shape: BoxShape.circle,
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Flexible(
+                            child: Text(
+                              peer.alias,
+                              style: const TextStyle(
+                                fontWeight: FontWeight.w700,
+                                fontSize: 15.5,
+                              ),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          if (peer.isTrusted) ...[
+                            const SizedBox(width: 6),
+                            Icon(
+                              Icons.verified_rounded,
+                              size: 15,
+                              color: accent,
+                            ),
+                          ],
+                        ],
+                      ),
+                      Text(
+                        '${peer.ipAddress} • ${peer.isTrusted ? "Host Fidato" : "Richiesta attiva"}',
+                        style: TextStyle(
+                          fontSize: 11.5,
+                          fontFamily: 'monospace',
+                          color: Theme.of(context)
+                              .textTheme
+                              .bodySmall
+                              ?.color
+                              ?.withValues(alpha: 0.65),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+
+                // Controlli compatti per scorrere tra le DIVERSE chat se ce n'è più di una
+                if (allChats.length > 1) ...[
+                  IconButton(
+                    visualDensity: VisualDensity.compact,
+                    tooltip: 'Chat precedente',
+                    icon: const Icon(Icons.chevron_left_rounded),
+                    onPressed: () => controller.cycleActiveChat(-1),
+                  ),
+                  Text(
+                    '${allChats.indexWhere((c) => c.nodeId == peer.nodeId) + 1}/${allChats.length}',
+                    style: const TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  IconButton(
+                    visualDensity: VisualDensity.compact,
+                    tooltip: 'Chat successiva',
+                    icon: const Icon(Icons.chevron_right_rounded),
+                    onPressed: () => controller.cycleActiveChat(1),
+                  ),
+                ],
+                IconButton(
+                  tooltip: peer.isTrusted
+                      ? 'Rimuovi dai contatti fidati'
+                      : 'Salva come contatto fidato',
+                  icon: Icon(
+                    peer.isTrusted
+                        ? Icons.bookmark_rounded
+                        : Icons.bookmark_border_rounded,
+                    color: peer.isTrusted ? accent : null,
+                  ),
+                  onPressed: () => controller.toggleSaveContact(peer),
+                ),
+              ],
+            ),
+          ),
+
+          // Corpo Messaggi
+          Expanded(
+            child: messages.isEmpty
+                ? _buildEmptyState(
+                    icon: Icons.swap_horiz_rounded,
+                    title: 'Canale P2P pronto con ${peer.alias}',
+                    subtitle:
+                        'Tocca il pulsante + in basso per trasferire file di qualsiasi dimensione o scrivi un messaggio.',
+                  )
+                : ListView.builder(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 14,
+                    ),
+                    itemCount: messages.length,
+                    itemBuilder: (context, index) {
+                      return _buildModernMessageBubble(
+                        context,
+                        controller,
+                        messages[index],
+                      );
+                    },
+                  ),
+          ),
+
+          // Unica barra di composizione minimale (Niente pulsanti duplicati)
+          Container(
+            padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
+            child: Row(
+              children: [
+                IconButton.filledTonal(
+                  tooltip: 'Invia file',
+                  icon: const Icon(Icons.add_rounded),
+                  onPressed: controller.isTransferring
+                      ? null
+                      : () => controller.pickAndSendFile(targetOverride: peer),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: TextField(
+                    controller: _msgController,
+                    decoration: const InputDecoration(
+                      hintText: 'Messaggio...',
+                    ),
+                    onSubmitted: (_) => _sendText(controller),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                IconButton.filled(
+                  icon: const Icon(Icons.arrow_upward_rounded),
+                  onPressed: () => _sendText(controller),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _sendText(P2PController controller) {
+    final text = _msgController.text.trim();
+    if (text.isEmpty) return;
+    _msgController.clear();
+    controller.sendText(text);
+  }
+
+  Widget _buildModernMessageBubble(
+    BuildContext context,
+    P2PController controller,
+    P2PChatMessage msg,
   ) {
-    final List<FileHistoryEntry> items = switch (_historyFilter) {
+    final bool isMe = msg.isOutgoing;
+    final bool isFile = msg.type == TransferPayloadType.binaryFile;
+    final bool hasLocalFile =
+        msg.filePath != null && File(msg.filePath!).existsSync();
+    final Color accent = Theme.of(context).colorScheme.primary;
+    final double radius = controller.uiStyle.borderRadius;
+
+    return Align(
+      alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 390),
+        child: Container(
+          margin: const EdgeInsets.symmetric(vertical: 4),
+          decoration: BoxDecoration(
+            color: isMe
+                ? accent.withValues(alpha: 0.16)
+                : Theme.of(context).cardTheme.color,
+            borderRadius: BorderRadius.circular(radius),
+            border: Border.all(
+              color: isMe
+                  ? accent.withValues(alpha: 0.35)
+                  : Colors.white.withValues(alpha: 0.07),
+            ),
+          ),
+          child: InkWell(
+            borderRadius: BorderRadius.circular(radius),
+            onTap: isFile
+                ? () => _openFilePreview(
+                      context,
+                      fileName: msg.content,
+                      filePath: msg.filePath,
+                    )
+                : null,
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  if (isFile) ...[
+                    if (_isImageFile(msg.content) && hasLocalFile)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 8.0),
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(radius - 4),
+                          child: Image.file(
+                            File(msg.filePath!),
+                            height: 170,
+                            width: double.infinity,
+                            fit: BoxFit.cover,
+                          ),
+                        ),
+                      ),
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.all(9),
+                          decoration: BoxDecoration(
+                            color: accent.withValues(alpha: 0.15),
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: Icon(
+                            _isImageFile(msg.content)
+                                ? Icons.image_outlined
+                                : _isVideoFile(msg.content)
+                                    ? Icons.play_circle_outline_rounded
+                                    : _isAudioFile(msg.content)
+                                        ? Icons.graphic_eq_rounded
+                                        : Icons.insert_drive_file_outlined,
+                            color: accent,
+                            size: 20,
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Flexible(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                msg.content,
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.w600,
+                                  fontSize: 13.5,
+                                ),
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                              const SizedBox(height: 2),
+                              Text(
+                                '${_formatBytes(msg.fileSize ?? 0)} • Tocca per aprire',
+                                style: TextStyle(
+                                  fontSize: 11.5,
+                                  color: accent,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ] else
+                    Text(
+                      msg.content,
+                      style: const TextStyle(fontSize: 14.5, height: 1.35),
+                    ),
+                  const SizedBox(height: 4),
+                  Text(
+                    DateFormat('HH:mm').format(msg.timestamp),
+                    style: TextStyle(
+                      fontSize: 10,
+                      color: Theme.of(context)
+                          .textTheme
+                          .bodySmall
+                          ?.color
+                          ?.withValues(alpha: 0.55),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Sezione 3: Archivio (Cronologia File Inviati e Ricevuti)
+  Widget _buildVaultStage(BuildContext context, P2PController controller) {
+    final List<FileHistoryEntry> list = switch (_vaultFilter) {
       'sent' => controller.sentFileHistory,
       'received' => controller.receivedFileHistory,
       _ => controller.fileHistory,
@@ -636,99 +1084,100 @@ class _AdaptiveHomeScreenState extends State<AdaptiveHomeScreen> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Padding(
-          padding: const EdgeInsets.all(14.0),
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
           child: Row(
             children: [
-              const Icon(Icons.history_edu_rounded),
-              const SizedBox(width: 8),
-              const Expanded(
-                child: Text(
-                  'Cronologia Trasferimenti File',
-                  style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold),
+              Expanded(
+                child: SegmentedButton<String>(
+                  showSelectedIcon: false,
+                  segments: [
+                    ButtonSegment(
+                      value: 'all',
+                      label: Text('Tutti (${controller.fileHistory.length})'),
+                    ),
+                    ButtonSegment(
+                      value: 'sent',
+                      label: Text(
+                        'Inviati (${controller.sentFileHistory.length})',
+                      ),
+                    ),
+                    ButtonSegment(
+                      value: 'received',
+                      label: Text(
+                        'Ricevuti (${controller.receivedFileHistory.length})',
+                      ),
+                    ),
+                  ],
+                  selected: {_vaultFilter},
+                  onSelectionChanged: (s) =>
+                      setState(() => _vaultFilter = s.first),
                 ),
               ),
-              SegmentedButton<String>(
-                segments: [
-                  ButtonSegment(
-                    value: 'sent',
-                    label: Text('Inviati (${controller.sentFileHistory.length})'),
-                  ),
-                  ButtonSegment(
-                    value: 'received',
-                    label: Text(
-                      'Ricevuti (${controller.receivedFileHistory.length})',
-                    ),
-                  ),
-                  const ButtonSegment(value: 'all', label: Text('Tutti')),
-                ],
-                selected: {_historyFilter},
-                onSelectionChanged: (v) =>
-                    setState(() => _historyFilter = v.first),
-              ),
-              const SizedBox(width: 8),
-              if (controller.fileHistory.isNotEmpty)
+              if (controller.fileHistory.isNotEmpty) ...[
+                const SizedBox(width: 8),
                 IconButton(
-                  tooltip: 'Svuota cronologia',
-                  icon: const Icon(Icons.delete_sweep_outlined),
+                  tooltip: 'Svuota archivio',
+                  icon: const Icon(Icons.delete_outline_rounded),
                   onPressed: controller.clearFileHistory,
                 ),
+              ],
             ],
           ),
         ),
-        const Divider(height: 1),
         Expanded(
-          child: items.isEmpty
-              ? const Center(
-                  child: Text('Nessun file presente in questa sezione.'),
+          child: list.isEmpty
+              ? _buildEmptyState(
+                  icon: Icons.folder_open_rounded,
+                  title: 'Archivio trasferimenti vuoto',
+                  subtitle:
+                      'I file inviati e ricevuti compariranno qui con accesso rapido all\'anteprima.',
                 )
               : ListView.separated(
-                  padding: const EdgeInsets.all(12),
-                  itemCount: items.length,
+                  padding: const EdgeInsets.all(14),
+                  itemCount: list.length,
                   separatorBuilder: (_, __) => const SizedBox(height: 8),
-                  itemBuilder: (context, index) {
-                    final entry = items[index];
-                    final bool exists = entry.filePath != null &&
-                        File(entry.filePath!).existsSync();
+                  itemBuilder: (context, idx) {
+                    final item = list[idx];
+                    final Color accent = Theme.of(context).colorScheme.primary;
 
                     return Card(
                       child: ListTile(
-                        leading: CircleAvatar(
+                        leading: Container(
+                          width: 40,
+                          height: 40,
+                          decoration: BoxDecoration(
+                            color: accent.withValues(alpha: 0.12),
+                            borderRadius: BorderRadius.circular(10),
+                          ),
                           child: Icon(
-                            entry.isOutgoing
-                                ? Icons.upload_file_rounded
-                                : Icons.downloading_rounded,
+                            item.isOutgoing
+                                ? Icons.north_east_rounded
+                                : Icons.south_west_rounded,
+                            color: accent,
+                            size: 20,
                           ),
                         ),
                         title: Text(
-                          entry.fileName,
-                          style: const TextStyle(fontWeight: FontWeight.w600),
+                          item.fileName,
+                          style: const TextStyle(
+                            fontWeight: FontWeight.w600,
+                            fontSize: 14,
+                          ),
+                          overflow: TextOverflow.ellipsis,
                         ),
                         subtitle: Text(
-                          '${entry.isOutgoing ? "Inviato a" : "Ricevuto da"}: ${entry.peerAlias} (${entry.peerIp})\n'
-                          'Dimensione: ${_formatBytes(entry.fileSizeBytes)} • ${DateFormat("dd/MM/yyyy HH:mm").format(entry.timestamp)}',
+                          '${item.isOutgoing ? "A" : "Da"} ${item.peerAlias} • ${_formatBytes(item.fileSizeBytes)} • ${DateFormat("dd/MM HH:mm").format(item.timestamp)}',
+                          style: const TextStyle(fontSize: 12),
                         ),
-                        isThreeLine: true,
-                        trailing: exists
-                            ? FilledButton.tonalIcon(
-                                icon: const Icon(
-                                  Icons.visibility_rounded,
-                                  size: 18,
-                                ),
-                                label: const Text('Anteprima'),
-                                onPressed: () => _openFilePreview(
-                                  context,
-                                  fileName: entry.fileName,
-                                  filePath: entry.filePath,
-                                ),
-                              )
-                            : const Chip(label: Text('File spostato')),
-                        onTap: exists
-                            ? () => _openFilePreview(
-                                  context,
-                                  fileName: entry.fileName,
-                                  filePath: entry.filePath,
-                                )
-                            : null,
+                        trailing: const Icon(
+                          Icons.open_in_new_rounded,
+                          size: 18,
+                        ),
+                        onTap: () => _openFilePreview(
+                          context,
+                          fileName: item.fileName,
+                          filePath: item.filePath,
+                        ),
                       ),
                     );
                   },
@@ -738,285 +1187,206 @@ class _AdaptiveHomeScreenState extends State<AdaptiveHomeScreen> {
     );
   }
 
-  /// Area Chat con supporto allo scorrimento tra chat e anteprima multimediale
-  Widget _buildChatArea(
-    BuildContext context,
-    P2PController controller, {
-    bool isMobile = false,
+  /// Sezione 4: Stile, Temi, Audio SFX e Identità Locale (Senza Google Login)
+  Widget _buildStyleStage(BuildContext context, P2PController controller) {
+    final aliasCtrl = TextEditingController(text: controller.localAlias);
+
+    return ListView(
+      padding: const EdgeInsets.all(18),
+      children: [
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'IDENTITÀ DISPOSITIVO',
+                  style: TextStyle(
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 1.1,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: aliasCtrl,
+                        decoration: const InputDecoration(
+                          labelText: 'Nome visibile sulla rete LAN',
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    FilledButton(
+                      onPressed: () {
+                        controller.updateLocalAlias(aliasCtrl.text);
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                            content: Text('Alias aggiornato.'),
+                            behavior: SnackBarBehavior.floating,
+                          ),
+                        );
+                      },
+                      child: const Text('Salva'),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 14),
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'PALETTE COLORI FINTECH',
+                  style: TextStyle(
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 1.1,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: AppThemePreset.values.map((preset) {
+                    final selected = controller.themePreset == preset;
+                    return ChoiceChip(
+                      avatar: CircleAvatar(
+                        backgroundColor: preset.darkSeed,
+                        radius: 8,
+                      ),
+                      label: Text(preset.label),
+                      selected: selected,
+                      onSelected: (_) => controller.setThemePreset(preset),
+                    );
+                  }).toList(),
+                ),
+                const SizedBox(height: 18),
+                const Text(
+                  'GEOMETRIA INTERFACCIA',
+                  style: TextStyle(
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 1.1,
+                  ),
+                ),
+                const SizedBox(height: 10),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: AppUiStyle.values.map((style) {
+                    return ChoiceChip(
+                      label: Text(style.label),
+                      selected: controller.uiStyle == style,
+                      onSelected: (_) => controller.setUiStyle(style),
+                    );
+                  }).toList(),
+                ),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 14),
+        Card(
+          child: Column(
+            children: [
+              SwitchListTile(
+                title: const Text('Tema Scuro (Dark Mode)'),
+                value: controller.isDarkMode,
+                onChanged: controller.toggleDarkMode,
+              ),
+              if (controller.isDarkMode)
+                SwitchListTile(
+                  title: const Text('Contrasto Puro AMOLED (#000000)'),
+                  value: controller.useAmoledBlack,
+                  onChanged: controller.toggleAmoledBlack,
+                ),
+              SwitchListTile(
+                title: const Text('Suono Notifica Richieste (SFX)'),
+                subtitle: const Text(
+                  'Avviso acustico quando un host non salvato invia un file',
+                ),
+                value: controller.sfxEnabled,
+                onChanged: controller.toggleSfx,
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildEmptyState({
+    required IconData icon,
+    required String title,
+    required String subtitle,
   }) {
-    final PeerNode? peer = controller.selectedPeer;
-    if (peer == null) {
-      return const Center(
-        child: Text(
-          'Seleziona un nodo o un contatto salvato per chattare o inviare file.',
-        ),
-      );
-    }
-
-    final messages = controller.messagesForSelectedPeer;
-    final scrollController = _scrollControllerForPeer(peer.nodeId);
-
-    return GestureDetector(
-      // Permette di scorrere orizzontalmente tra le diverse chat su mobile/touch
-      onHorizontalDragEnd: (details) {
-        if (details.primaryVelocity == null) return;
-        if (details.primaryVelocity! < -400) {
-          controller.cycleActiveChat(1);
-        } else if (details.primaryVelocity! > 400) {
-          controller.cycleActiveChat(-1);
-        }
-      },
-      child: Column(
-        children: [
-          // Intestazione della Chat selezionata
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-            decoration: BoxDecoration(
-              color: Theme.of(context).cardTheme.color,
-              border: Border(
-                bottom: BorderSide(
-                  color: Theme.of(context).dividerColor.withValues(alpha: 0.2),
-                ),
+    final Color accent = Theme.of(context).colorScheme.primary;
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32.0),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 56,
+              height: 56,
+              decoration: BoxDecoration(
+                color: accent.withValues(alpha: 0.10),
+                borderRadius: BorderRadius.circular(18),
               ),
+              child: Icon(icon, color: accent, size: 28),
             ),
-            child: Row(
-              children: [
-                if (isMobile)
-                  IconButton(
-                    icon: const Icon(Icons.arrow_back_rounded),
-                    onPressed: () => controller.selectPeer(null),
-                  ),
-                Icon(
-                  peer.isOnline ? Icons.circle : Icons.circle_outlined,
-                  size: 12,
-                  color: peer.isOnline ? Colors.greenAccent : Colors.grey,
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        peer.alias,
-                        style: const TextStyle(
-                          fontWeight: FontWeight.bold,
-                          fontSize: 15.5,
-                        ),
-                      ),
-                      Text(
-                        '${peer.ipAddress}:${peer.tcpPort} • ${peer.isTrusted ? "Contatto Fidato (Chat Permanente)" : "Host Temporaneo (Richiesta Obbligatoria)"}',
-                        style: const TextStyle(fontSize: 11.5),
-                      ),
-                    ],
-                  ),
-                ),
-                IconButton(
-                  tooltip: peer.isTrusted
-                      ? 'Contatto Fidato Salvato'
-                      : 'Salva come Contatto Fidato',
-                  icon: Icon(
-                    peer.isTrusted
-                        ? Icons.star_rounded
-                        : Icons.star_border_rounded,
-                    color: peer.isTrusted ? Colors.amber : null,
-                  ),
-                  onPressed: () => controller.toggleSaveContact(peer),
-                ),
-                FilledButton.icon(
-                  icon: const Icon(Icons.attach_file_rounded, size: 18),
-                  label: const Text('Invia File'),
-                  onPressed: controller.isTransferring
-                      ? null
-                      : () => controller.pickAndSendFile(targetOverride: peer),
-                ),
-              ],
-            ),
-          ),
-
-          // Lista Messaggi e File con Anteprima
-          Expanded(
-            child: messages.isEmpty
-                ? Center(
-                    child: Text(
-                      'Nessun messaggio con ${peer.alias}.\nInvia un testo o un file (anche di grandi dimensioni)!',
-                      textAlign: TextAlign.center,
-                    ),
-                  )
-                : ListView.builder(
-                    controller: scrollController,
-                    padding: const EdgeInsets.all(14),
-                    itemCount: messages.length,
-                    itemBuilder: (context, index) {
-                      final msg = messages[index];
-                      return _buildMessageBubble(context, controller, msg);
-                    },
-                  ),
-          ),
-
-          // Barra di input messaggio e allegato
-          Padding(
-            padding: const EdgeInsets.all(10.0),
-            child: Row(
-              children: [
-                IconButton.filledTonal(
-                  tooltip: 'Allega e invia file frammentato',
-                  icon: const Icon(Icons.add_rounded),
-                  onPressed: controller.isTransferring
-                      ? null
-                      : () => controller.pickAndSendFile(targetOverride: peer),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: TextField(
-                    controller: _msgController,
-                    decoration: const InputDecoration(
-                      hintText: 'Scrivi un messaggio...',
-                      isDense: true,
-                      contentPadding: EdgeInsets.symmetric(
-                        horizontal: 14,
-                        vertical: 12,
-                      ),
-                    ),
-                    onSubmitted: (val) => _submitText(controller),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                IconButton.filled(
-                  icon: const Icon(Icons.send_rounded),
-                  onPressed: () => _submitText(controller),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  void _submitText(P2PController controller) {
-    final text = _msgController.text.trim();
-    if (text.isEmpty) return;
-    _msgController.clear();
-    controller.sendText(text);
-  }
-
-  Widget _buildMessageBubble(
-    BuildContext context,
-    P2PController controller,
-    P2PChatMessage msg,
-  ) {
-    final bool isMe = msg.isOutgoing;
-    final bool isFile = msg.type == TransferPayloadType.binaryFile;
-    final bool hasLocalFile =
-        msg.filePath != null && File(msg.filePath!).existsSync();
-
-    return Align(
-      alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 420),
-        child: Card(
-          color: isMe
-              ? Theme.of(context).colorScheme.primaryContainer
-              : Theme.of(context).cardTheme.color,
-          margin: const EdgeInsets.symmetric(vertical: 5),
-          child: InkWell(
-            borderRadius:
-                BorderRadius.circular(controller.uiStyle.borderRadius),
-            onTap: isFile
-                ? () => _openFilePreview(
-                      context,
-                      fileName: msg.content,
-                      filePath: msg.filePath,
-                    )
-                : null,
-            child: Padding(
-              padding: const EdgeInsets.all(12.0),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  if (isFile) ...[
-                    // Se è un'immagine presente su disco, mostra subito la miniatura cliccabile
-                    if (_isImageFile(msg.content) && hasLocalFile)
-                      Padding(
-                        padding: const EdgeInsets.only(bottom: 8.0),
-                        child: ClipRRect(
-                          borderRadius: BorderRadius.circular(8),
-                          child: Image.file(
-                            File(msg.filePath!),
-                            height: 180,
-                            width: double.infinity,
-                            fit: BoxFit.cover,
-                          ),
-                        ),
-                      ),
-                    Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(
-                          _isImageFile(msg.content)
-                              ? Icons.image_rounded
-                              : _isVideoFile(msg.content)
-                                  ? Icons.movie_creation_rounded
-                                  : _isAudioFile(msg.content)
-                                      ? Icons.audiotrack_rounded
-                                      : Icons.insert_drive_file_rounded,
-                        ),
-                        const SizedBox(width: 8),
-                        Flexible(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                msg.content,
-                                style: const TextStyle(
-                                  fontWeight: FontWeight.bold,
-                                ),
-                              ),
-                              Text(
-                                '${_formatBytes(msg.fileSize ?? 0)} • Tocca per aprire l\'anteprima',
-                                style: const TextStyle(fontSize: 11.5),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ],
-                    ),
-                  ] else
-                    Text(msg.content, style: const TextStyle(fontSize: 14.5)),
-                  const SizedBox(height: 4),
-                  Text(
-                    DateFormat('HH:mm').format(msg.timestamp),
-                    style: TextStyle(
-                      fontSize: 10.5,
-                      color: Theme.of(context)
-                          .textTheme
-                          .bodySmall
-                          ?.color
-                          ?.withValues(alpha: 0.7),
-                    ),
-                  ),
-                ],
+            const SizedBox(height: 16),
+            Text(
+              title,
+              style: const TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.w700,
               ),
+              textAlign: TextAlign.center,
             ),
-          ),
+            const SizedBox(height: 6),
+            Text(
+              subtitle,
+              style: TextStyle(
+                fontSize: 13,
+                color: Theme.of(context)
+                    .textTheme
+                    .bodySmall
+                    ?.color
+                    ?.withValues(alpha: 0.7),
+              ),
+              textAlign: TextAlign.center,
+            ),
+          ],
         ),
       ),
     );
   }
 
-  void _showConnectByIpDialog(
+  void _showConnectByIpModal(
     BuildContext context,
     P2PController controller,
   ) {
     final ipCtrl = TextEditingController();
     final aliasCtrl = TextEditingController();
-    bool saveAsTrusted = true;
+    bool trustHost = true;
 
     showDialog(
       context: context,
       builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setDialogState) => AlertDialog(
-          title: const Text('Connetti o Salva Host via IP'),
+        builder: (ctx, setModalState) => AlertDialog(
+          title: const Text('Collega Host via IP'),
           content: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -1030,19 +1400,15 @@ class _AdaptiveHomeScreenState extends State<AdaptiveHomeScreen> {
               TextField(
                 controller: aliasCtrl,
                 decoration: const InputDecoration(
-                  labelText: 'Nome Contatto (opzionale)',
+                  labelText: 'Alias (opzionale)',
                 ),
               ),
               const SizedBox(height: 10),
-              CheckboxListTile(
+              SwitchListTile(
                 contentPadding: EdgeInsets.zero,
-                title: const Text('Salva come Contatto Fidato'),
-                subtitle: const Text(
-                  'Chat permanente e ricezione file senza richiesta',
-                ),
-                value: saveAsTrusted,
-                onChanged: (v) =>
-                    setDialogState(() => saveAsTrusted = v ?? true),
+                title: const Text('Salva nei Contatti Fidati'),
+                value: trustHost,
+                onChanged: (v) => setModalState(() => trustHost = v),
               ),
             ],
           ),
@@ -1057,7 +1423,7 @@ class _AdaptiveHomeScreenState extends State<AdaptiveHomeScreen> {
                 controller.connectByIp(
                   ipAddress: ipCtrl.text,
                   customAlias: aliasCtrl.text,
-                  saveAsTrusted: saveAsTrusted,
+                  saveAsTrusted: trustHost,
                 );
               },
               child: const Text('Connetti'),
@@ -1067,197 +1433,9 @@ class _AdaptiveHomeScreenState extends State<AdaptiveHomeScreen> {
       ),
     );
   }
-
-  void _showSettingsAndThemesSheet(
-    BuildContext context,
-    P2PController controller,
-  ) {
-    final aliasCtrl = TextEditingController(text: controller.localAlias);
-    final clientIdCtrl =
-        TextEditingController(text: controller.googleDesktopClientId);
-    final clientSecretCtrl =
-        TextEditingController(text: controller.googleDesktopClientSecret);
-
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      builder: (ctx) => DraggableScrollableSheet(
-        expand: false,
-        initialChildSize: 0.78,
-        maxChildSize: 0.92,
-        builder: (_, scrollCtrl) => ListView(
-          controller: scrollCtrl,
-          padding: const EdgeInsets.all(20),
-          children: [
-            const Text(
-              'Personalizzazione, Temi e Account Google',
-              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 16),
-
-            // Sezione Temi Colore
-            const Text(
-              'Tema Colore',
-              style: TextStyle(fontWeight: FontWeight.w600),
-            ),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: AppThemePreset.values.map((preset) {
-                return ChoiceChip(
-                  avatar: CircleAvatar(backgroundColor: preset.darkSeed),
-                  label: Text(preset.label),
-                  selected: controller.themePreset == preset,
-                  onSelected: (_) => controller.setThemePreset(preset),
-                );
-              }).toList(),
-            ),
-            const SizedBox(height: 16),
-
-            // Sezione Stile UI
-            const Text(
-              'Stile Interfaccia e Bordi',
-              style: TextStyle(fontWeight: FontWeight.w600),
-            ),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: AppUiStyle.values.map((style) {
-                return ChoiceChip(
-                  label: Text(style.label),
-                  selected: controller.uiStyle == style,
-                  onSelected: (_) => controller.setUiStyle(style),
-                );
-              }).toList(),
-            ),
-            const Divider(height: 28),
-
-            SwitchListTile(
-              title: const Text('Modalità Scura (Dark Mode)'),
-              value: controller.isDarkMode,
-              onChanged: controller.toggleDarkMode,
-            ),
-            if (controller.isDarkMode)
-              SwitchListTile(
-                title: const Text('Nero Puro AMOLED'),
-                value: controller.useAmoledBlack,
-                onChanged: controller.toggleAmoledBlack,
-              ),
-            SwitchListTile(
-              title: const Text('Effetto Sonoro (SFX) su Richieste File'),
-              subtitle: const Text(
-                'Riproduce un suono quando un host non fidato chiede di inviare un file',
-              ),
-              value: controller.sfxEnabled,
-              onChanged: controller.toggleSfx,
-            ),
-            const Divider(height: 28),
-
-            // Vero Login Google OAuth 2.0 (Desktop PKCE + Android)
-            const Text(
-              'Account Google (OAuth 2.0 PKCE Desktop / Android)',
-              style: TextStyle(fontWeight: FontWeight.w600),
-            ),
-            const SizedBox(height: 8),
-            if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) ...[
-              TextField(
-                controller: clientIdCtrl,
-                decoration: const InputDecoration(
-                  labelText: 'Google OAuth Desktop Client ID',
-                  hintText: 'es. 123456-abc.apps.googleusercontent.com',
-                ),
-              ),
-              const SizedBox(height: 8),
-              TextField(
-                controller: clientSecretCtrl,
-                obscureText: true,
-                decoration: const InputDecoration(
-                  labelText: 'Google OAuth Client Secret ( per Desktop)',
-                ),
-              ),
-              const SizedBox(height: 8),
-              Align(
-                alignment: Alignment.centerRight,
-                child: TextButton.icon(
-                  icon: const Icon(Icons.save_outlined),
-                  label: const Text('Salva Credenziali OAuth'),
-                  onPressed: () {
-                    controller.saveGoogleOAuthCredentials(
-                      clientId: clientIdCtrl.text,
-                      clientSecret: clientSecretCtrl.text,
-                    );
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(
-                        content: Text('Credenziali OAuth salvate.'),
-                      ),
-                    );
-                  },
-                ),
-              ),
-            ],
-            if (controller.isGoogleSignedIn)
-              ListTile(
-                leading: const CircleAvatar(child: Icon(Icons.verified_user)),
-                title: Text(controller.googleDisplayName ?? 'Utente Google'),
-                subtitle: Text(controller.googleEmail ?? ''),
-                trailing: OutlinedButton(
-                  onPressed: controller.signOutGoogle,
-                  child: const Text('Disconnetti'),
-                ),
-              )
-            else
-              FilledButton.icon(
-                icon: controller.isAuthenticatingGoogle
-                    ? const SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : const Icon(Icons.login_rounded),
-                label: const Text('Accedi con Google (OAuth 2.0 Reale)'),
-                onPressed: controller.isAuthenticatingGoogle
-                    ? null
-                    : () async {
-                        await controller.saveGoogleOAuthCredentials(
-                          clientId: clientIdCtrl.text,
-                          clientSecret: clientSecretCtrl.text,
-                        );
-                        await controller.signInWithGoogle();
-                      },
-              ),
-            const Divider(height: 28),
-
-            // Modifica Alias Locale
-            Row(
-              children: [
-                Expanded(
-                  child: TextField(
-                    controller: aliasCtrl,
-                    decoration: const InputDecoration(
-                      labelText: 'Il tuo Alias in Rete',
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                FilledButton(
-                  onPressed: () {
-                    controller.updateLocalAlias(aliasCtrl.text);
-                    Navigator.pop(ctx);
-                  },
-                  child: const Text('Aggiorna'),
-                ),
-              ],
-            ),
-          ],
-        ),
-      ),
-    );
-  }
 }
 
-/// Dialog modale di Anteprima per Foto, Video, Audio e File di Testo
+/// Dialog Multimediale per Foto, Video (con supporto Windows nativo), Audio e Testo
 class _FilePreviewDialog extends StatefulWidget {
   final String fileName;
   final String filePath;
@@ -1325,9 +1503,10 @@ class _FilePreviewDialogState extends State<_FilePreviewDialog> {
 
   Future<void> _initVideo() async {
     try {
-      _videoController = VideoPlayerController.file(File(widget.filePath));
-      await _videoController!.initialize();
-      await _videoController!.play();
+      final controller = VideoPlayerController.file(File(widget.filePath));
+      _videoController = controller;
+      await controller.initialize();
+      await controller.play();
       if (mounted) setState(() => _videoInitialized = true);
     } catch (e) {
       if (mounted) setState(() => _videoError = '$e');
@@ -1340,23 +1519,31 @@ class _FilePreviewDialogState extends State<_FilePreviewDialog> {
       if (mounted) {
         setState(() {
           _textContent = content.length > 20000
-              ? '${content.substring(0, 20000)}\n\n... [File troncato per anteprima]'
+              ? '${content.substring(0, 20000)}\n\n... [Troncato]'
               : content;
         });
       }
     } catch (e) {
-      if (mounted) setState(() => _textContent = 'Impossibile leggere il testo: $e');
+      if (mounted) setState(() => _textContent = 'Errore lettura: $e');
     }
   }
 
-  Future<void> _openWithSystemApp() async {
+  Future<void> _launchNativePlayer() async {
     try {
       if (Platform.isWindows) {
-        await Process.run('explorer.exe', ['/select,', widget.filePath]);
+        await Process.run('cmd', ['/c', 'start', '', widget.filePath]);
       } else if (Platform.isLinux) {
         await Process.run('xdg-open', [widget.filePath]);
       } else if (Platform.isMacOS) {
         await Process.run('open', [widget.filePath]);
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _revealInFolder() async {
+    try {
+      if (Platform.isWindows) {
+        await Process.run('explorer.exe', ['/select,', widget.filePath]);
       }
     } catch (_) {}
   }
@@ -1372,7 +1559,7 @@ class _FilePreviewDialogState extends State<_FilePreviewDialog> {
   Widget build(BuildContext context) {
     return Dialog(
       child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 720, maxHeight: 620),
+        constraints: const BoxConstraints(maxWidth: 700, maxHeight: 600),
         child: Padding(
           padding: const EdgeInsets.all(16.0),
           child: Column(
@@ -1384,18 +1571,24 @@ class _FilePreviewDialogState extends State<_FilePreviewDialog> {
                     child: Text(
                       widget.fileName,
                       style: const TextStyle(
-                        fontWeight: FontWeight.bold,
-                        fontSize: 16,
+                        fontWeight: FontWeight.w700,
+                        fontSize: 15.5,
                       ),
                       overflow: TextOverflow.ellipsis,
                     ),
                   ),
-                  if (Platform.isWindows || Platform.isLinux || Platform.isMacOS)
+                  if (Platform.isWindows) ...[
                     TextButton.icon(
-                      icon: const Icon(Icons.folder_open_rounded, size: 18),
-                      label: const Text('Mostra nella cartella'),
-                      onPressed: _openWithSystemApp,
+                      icon: const Icon(Icons.play_lesson_outlined, size: 18),
+                      label: const Text('Apri con App PC'),
+                      onPressed: _launchNativePlayer,
                     ),
+                    IconButton(
+                      tooltip: 'Mostra in Esplora File',
+                      icon: const Icon(Icons.folder_open_rounded, size: 20),
+                      onPressed: _revealInFolder,
+                    ),
+                  ],
                   IconButton(
                     icon: const Icon(Icons.close_rounded),
                     onPressed: () => Navigator.pop(context),
@@ -1403,7 +1596,7 @@ class _FilePreviewDialogState extends State<_FilePreviewDialog> {
                 ],
               ),
               const Divider(),
-              Flexible(child: _buildPreviewBody()),
+              Flexible(child: _buildPreviewContent()),
             ],
           ),
         ),
@@ -1411,7 +1604,7 @@ class _FilePreviewDialogState extends State<_FilePreviewDialog> {
     );
   }
 
-  Widget _buildPreviewBody() {
+  Widget _buildPreviewContent() {
     if (widget.isImage) {
       return InteractiveViewer(
         minScale: 0.5,
@@ -1421,21 +1614,21 @@ class _FilePreviewDialogState extends State<_FilePreviewDialog> {
     }
 
     if (widget.isAudio) {
-      final double maxSec =
+      final double maxMs =
           _audioDuration.inMilliseconds.toDouble().clamp(1.0, double.infinity);
-      final double curSec =
-          _audioPosition.inMilliseconds.toDouble().clamp(0.0, maxSec);
+      final double curMs =
+          _audioPosition.inMilliseconds.toDouble().clamp(0.0, maxMs);
 
       return Padding(
         padding: const EdgeInsets.symmetric(vertical: 28, horizontal: 16),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Icon(Icons.music_note_rounded, size: 64),
+            const Icon(Icons.graphic_eq_rounded, size: 56),
             const SizedBox(height: 16),
             Slider(
-              value: curSec,
-              max: maxSec,
+              value: curMs,
+              max: maxMs,
               onChanged: (val) {
                 _audioPlayer?.seek(Duration(milliseconds: val.toInt()));
               },
@@ -1443,10 +1636,11 @@ class _FilePreviewDialogState extends State<_FilePreviewDialog> {
             Text(
               '${_audioPosition.inMinutes}:${(_audioPosition.inSeconds % 60).toString().padLeft(2, "0")} / '
               '${_audioDuration.inMinutes}:${(_audioDuration.inSeconds % 60).toString().padLeft(2, "0")}',
+              style: const TextStyle(fontFamily: 'monospace'),
             ),
             const SizedBox(height: 12),
             IconButton.filled(
-              iconSize: 36,
+              iconSize: 34,
               icon: Icon(
                 _isPlayingAudio
                     ? Icons.pause_rounded
@@ -1469,24 +1663,47 @@ class _FilePreviewDialogState extends State<_FilePreviewDialog> {
 
     if (widget.isVideo) {
       if (_videoError != null) {
-        return Center(
-          child: Text('Codec video gestito dal sistema:\n$_videoError'),
+        return Padding(
+          padding: const EdgeInsets.all(24.0),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.movie_outlined, size: 48),
+              const SizedBox(height: 12),
+              const Text(
+                'Formato video pronto per il lettore di sistema.',
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 14),
+              FilledButton.icon(
+                icon: const Icon(Icons.open_in_new_rounded),
+                label: const Text('Riproduci nel Player Nativo'),
+                onPressed: _launchNativePlayer,
+              ),
+            ],
+          ),
         );
       }
       if (!_videoInitialized || _videoController == null) {
-        return const Center(child: CircularProgressIndicator());
+        return const Padding(
+          padding: EdgeInsets.all(32.0),
+          child: CircularProgressIndicator(),
+        );
       }
       return Column(
         mainAxisSize: MainAxisSize.min,
         children: [
           Flexible(
             child: AspectRatio(
-              aspectRatio: _videoController!.value.aspectRatio,
+              aspectRatio: _videoController!.value.aspectRatio > 0
+                  ? _videoController!.value.aspectRatio
+                  : 16 / 9,
               child: VideoPlayer(_videoController!),
             ),
           ),
-          VideoProgressIndicator(_videoController!, allowScrubbing: true),
           const SizedBox(height: 8),
+          VideoProgressIndicator(_videoController!, allowScrubbing: true),
+          const SizedBox(height: 10),
           IconButton.filled(
             icon: Icon(
               _videoController!.value.isPlaying
@@ -1520,10 +1737,13 @@ class _FilePreviewDialogState extends State<_FilePreviewDialog> {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          const Icon(Icons.insert_drive_file_outlined, size: 56),
+          const Icon(Icons.insert_drive_file_outlined, size: 48),
           const SizedBox(height: 12),
-          Text('Percorso salvataggio:\n${widget.filePath}',
-              textAlign: TextAlign.center),
+          Text(
+            widget.filePath,
+            textAlign: TextAlign.center,
+            style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+          ),
         ],
       ),
     );
