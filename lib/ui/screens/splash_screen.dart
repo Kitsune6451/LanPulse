@@ -29,7 +29,6 @@ class _LanPulseSplashScreenState extends State<LanPulseSplashScreen>
       duration: const Duration(milliseconds: 1900),
     );
 
-    // Battito del logo al centro nei primi 0.5s, seguito dal secondo impulso
     _pulseScale = TweenSequence<double>([
       TweenSequenceItem(
         tween: Tween(begin: 0.85, end: 1.22)
@@ -67,8 +66,6 @@ class _LanPulseSplashScreenState extends State<LanPulseSplashScreen>
       ),
     );
 
-    // Per i primi ~0.55 secondi (fino a 0.28) la larghezza del testo è 0 -> il logo è al centro!
-    // Poi si espande spostando il logo a sinistra e facendo apparire "LAN\nPULSE"
     _textWidthFactor = Tween<double>(begin: 0.0, end: 1.0).animate(
       CurvedAnimation(
         parent: _controller,
@@ -129,6 +126,7 @@ class _LanPulseSplashScreenState extends State<LanPulseSplashScreen>
           builder: (context, _) {
             return Row(
               mainAxisSize: MainAxisSize.min,
+              mainAxisAlignment: MainAxisAlignment.center,
               crossAxisAlignment: CrossAxisAlignment.center,
               children: [
                 Stack(
@@ -182,7 +180,6 @@ class _LanPulseSplashScreenState extends State<LanPulseSplashScreen>
                     ),
                   ],
                 ),
-                // Espansione orizzontale dopo 0.5s che spinge il logo a sinistra
                 SizeTransition(
                   axis: Axis.horizontal,
                   sizeFactor: _textWidthFactor,
