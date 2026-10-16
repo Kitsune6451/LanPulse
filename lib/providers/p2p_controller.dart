@@ -11,6 +11,7 @@ import '../core/constants/network_constants.dart';
 import '../models/p2p_packet.dart';
 import '../models/peer_node.dart';
 import '../services/discovery_service.dart';
+import '../services/notification_service.dart';
 import '../services/socket_transfer_service.dart';
 import '../services/sound_service.dart';
 
@@ -26,16 +27,6 @@ enum AppThemePreset {
   final Color lightSeed;
   final Color darkSeed;
   const AppThemePreset(this.label, this.lightSeed, this.darkSeed);
-}
-
-enum AppUiStyle {
-  modernGlass('Soft Rounded', 16.0),
-  compactSharp('Tech Sharp', 8.0),
-  minimalistFlat('Ultra Pill', 22.0);
-
-  final String label;
-  final double borderRadius;
-  const AppUiStyle(this.label, this.borderRadius);
 }
 
 class PendingRequestItem {
@@ -54,9 +45,12 @@ class P2PController extends ChangeNotifier with WidgetsBindingObserver {
   late final DiscoveryService _discoveryService;
   late final SocketTransferService _transferService;
   final SoundService _soundService = SoundService();
+  final NotificationAndBackgroundService _notifService =
+      NotificationAndBackgroundService.instance;
 
   List<PeerNode> _onlinePeers = [];
-  final Map<String, PeerNode> _savedContacts = {};
+  /// Tutti i peer conosciuti (sia fidati/salvati sia quelli con cui abbiamo una chat salvata)
+  final Map<String, PeerNode> _knownPeers = {};
   PeerNode? _selectedPeer;
 
   final List<P2PChatMessage> _messages = [];
@@ -64,8 +58,8 @@ class P2PController extends ChangeNotifier with WidgetsBindingObserver {
   final Map<String, int> _unreadCounts = {};
   final List<PendingRequestItem> _pendingFileRequests = [];
 
-  double _activeTransferProgress = 0.0;
-  bool _isTransferring = false;
+  ActiveTransferTask? _activeTransferTask;
+  int _lastNotifiedProgressPct = -1;
   bool _isScanningWifi = false;
   String? _statusBanner;
   bool _isBannerError = false;
@@ -73,7 +67,6 @@ class P2PController extends ChangeNotifier with WidgetsBindingObserver {
   bool _isDarkMode = true;
   bool _useAmoledBlack = false;
   AppThemePreset _themePreset = AppThemePreset.cyberPulse;
-  AppUiStyle _uiStyle = AppUiStyle.modernGlass;
   bool _sfxEnabled = true;
 
   PeerNode? get selectedPeer => _selectedPeer;
@@ -81,16 +74,16 @@ class P2PController extends ChangeNotifier with WidgetsBindingObserver {
   String? get localIp => _discoveryService.localIp;
   List<String> get allLocalIps => _discoveryService.allLocalIps;
   int get tcpPort => NetworkConstants.tcpTransferPort;
-  bool get isTransferring => _isTransferring;
+  ActiveTransferTask? get activeTransferTask => _activeTransferTask;
+  bool get isTransferring => _activeTransferTask != null;
+  double get activeTransferProgress => _activeTransferTask?.progress ?? 0.0;
   bool get isScanningWifi => _isScanningWifi;
-  double get activeTransferProgress => _activeTransferProgress;
   String? get errorBanner => _statusBanner;
   bool get isBannerError => _isBannerError;
 
   bool get isDarkMode => _isDarkMode;
   bool get useAmoledBlack => _useAmoledBlack;
   AppThemePreset get themePreset => _themePreset;
-  AppUiStyle get uiStyle => _uiStyle;
   bool get sfxEnabled => _sfxEnabled;
 
   List<FileHistoryEntry> get fileHistory => List.unmodifiable(_fileHistory);
@@ -105,27 +98,30 @@ class P2PController extends ChangeNotifier with WidgetsBindingObserver {
   int get totalUnreadCount =>
       _unreadCounts.values.fold(0, (prev, count) => prev + count);
 
+  /// Unisce i nodi online e tutti i nodi conosciuti/salvati senza creare duplicati
   List<PeerNode> get peers {
     final Map<String, PeerNode> merged = {};
 
-    for (final saved in _savedContacts.values) {
-      merged[saved.nodeId] = saved.copyWith(isTrusted: true, isOnline: false);
+    for (final saved in _knownPeers.values) {
+      merged[saved.nodeId] = saved.copyWith(isOnline: false);
     }
 
     for (final online in _onlinePeers) {
-      PeerNode? matchedContact = _savedContacts[online.nodeId];
-      if (matchedContact == null) {
-        for (final c in _savedContacts.values) {
-          if (c.ipAddress == online.ipAddress) {
-            matchedContact = c;
+      PeerNode? matchedKnown = _knownPeers[online.nodeId];
+      if (matchedKnown == null) {
+        for (final k in _knownPeers.values) {
+          if (k.ipAddress == online.ipAddress ||
+              (k.alias.toLowerCase() == online.alias.toLowerCase() &&
+                  k.platform == online.platform)) {
+            matchedKnown = k;
             break;
           }
         }
       }
 
-      final bool trusted = matchedContact != null;
+      final bool trusted = matchedKnown?.isTrusted ?? false;
       merged[online.nodeId] = online.copyWith(
-        alias: matchedContact?.alias ?? online.alias,
+        alias: matchedKnown?.alias ?? online.alias,
         isTrusted: trusted,
         isOnline: true,
       );
@@ -133,8 +129,8 @@ class P2PController extends ChangeNotifier with WidgetsBindingObserver {
 
     final List<PeerNode> result = merged.values.toList()
       ..sort((a, b) {
-        if (a.isTrusted != b.isTrusted) return a.isTrusted ? -1 : 1;
         if (a.isOnline != b.isOnline) return a.isOnline ? -1 : 1;
+        if (a.isTrusted != b.isTrusted) return a.isTrusted ? -1 : 1;
         return a.alias.toLowerCase().compareTo(b.alias.toLowerCase());
       });
     return result;
@@ -143,6 +139,7 @@ class P2PController extends ChangeNotifier with WidgetsBindingObserver {
   List<PeerNode> get savedContactsList =>
       peers.where((p) => p.isTrusted).toList();
 
+  /// Restituisce tutte le chat salvate (visibili in entrambi i dispositivi a ogni riavvio)
   List<PeerNode> get activeChatPeers {
     final Set<String> peerIdsWithMessages =
         _messages.map((m) => m.peerId).toSet();
@@ -225,6 +222,7 @@ class P2PController extends ChangeNotifier with WidgetsBindingObserver {
         _discoveryService.sendReverseConnectRequest(targetIp);
       },
       onIncomingFilePermissionCheck: _handleIncomingFilePermission,
+      onTransferTaskUpdated: _handleTransferTaskUpdated,
     );
 
     _initializeApp();
@@ -238,16 +236,42 @@ class P2PController extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   Future<void> _initializeApp() async {
+    // 1. Carica PRIMA l'identità persistente e le chat salvate
     await _loadSavedSettingsAndData();
+
+    // 2. Sincronizza subito il vero localNodeId con Discovery e Transfer Service
+    _discoveryService.updateIdentity(
+      newNodeId: localNodeId,
+      newAlias: _localAlias,
+    );
+    _transferService.localNodeId = localNodeId;
+    _transferService.localAlias = _localAlias;
 
     if (Platform.isAndroid) {
       try {
         await [
           Permission.nearbyWifiDevices,
           Permission.locationWhenInUse,
+          Permission.notification,
+          Permission.ignoreBatteryOptimizations,
         ].request();
       } catch (_) {}
     }
+
+    await _notifService.initialize(
+      onDecision: (transferId, accepted) {
+        PendingRequestItem? match;
+        for (final item in _pendingFileRequests) {
+          if (item.request.transferId == transferId) {
+            match = item;
+            break;
+          }
+        }
+        if (match != null) {
+          respondToFileRequest(match, accept: accepted);
+        }
+      },
+    );
 
     await _initializeNetworking();
   }
@@ -261,13 +285,15 @@ class P2PController extends ChangeNotifier with WidgetsBindingObserver {
         localNodeId = savedNodeId;
       } else {
         await prefs.setString('local_node_id', localNodeId);
+        // Aggiorna l'alias di default su Android col nodeId definitivo
+        if (!Platform.isWindows && !prefs.containsKey('local_alias')) {
+          _localAlias = 'Android-$localNodeId';
+        }
       }
 
       final String? savedAlias = prefs.getString('local_alias');
       if (savedAlias != null && savedAlias.isNotEmpty) {
         _localAlias = savedAlias;
-        _discoveryService.updateAlias(_localAlias);
-        _transferService.localAlias = _localAlias;
       }
 
       _isDarkMode = prefs.getBool('dark_mode') ?? true;
@@ -282,27 +308,25 @@ class P2PController extends ChangeNotifier with WidgetsBindingObserver {
         );
       }
 
-      final String? styleName = prefs.getString('ui_style');
-      if (styleName != null) {
-        _uiStyle = AppUiStyle.values.firstWhere(
-          (e) => e.name == styleName,
-          orElse: () => AppUiStyle.modernGlass,
-        );
-      }
-
-      final String? contactsJson = prefs.getString('saved_contacts_v2');
+      // Carica tutti i peer conosciuti/salvati (compatibile con v2 e v3)
+      final String? contactsJson =
+          prefs.getString('saved_known_peers_v3') ??
+              prefs.getString('saved_contacts_v2');
       if (contactsJson != null && contactsJson.isNotEmpty) {
         final List<dynamic> decoded = jsonDecode(contactsJson) as List<dynamic>;
         for (final item in decoded) {
-          final PeerNode contact =
+          final PeerNode peer =
               PeerNode.fromStorageMap(item as Map<String, dynamic>);
-          if (contact.nodeId.isNotEmpty) {
-            _savedContacts[contact.nodeId] = contact;
+          if (peer.nodeId.isNotEmpty) {
+            _knownPeers[peer.nodeId] = peer;
           }
         }
       }
 
-      final String? messagesJson = prefs.getString('saved_messages_v2');
+      // Carica TUTTE le chat salvate
+      final String? messagesJson =
+          prefs.getString('saved_messages_v3') ??
+              prefs.getString('saved_messages_v2');
       if (messagesJson != null && messagesJson.isNotEmpty) {
         final List<dynamic> decoded = jsonDecode(messagesJson) as List<dynamic>;
         _messages.clear();
@@ -328,22 +352,17 @@ class P2PController extends ChangeNotifier with WidgetsBindingObserver {
     } catch (_) {}
   }
 
+  /// Salva su disco tutti i contatti e TUTTE le chat attive su entrambi i dispositivi
   Future<void> _persistContactsAndMessages() async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      final List<Map<String, dynamic>> contactsList =
-          _savedContacts.values.map((c) => c.toStorageMap()).toList();
-      await prefs.setString('saved_contacts_v2', jsonEncode(contactsList));
+      final List<Map<String, dynamic>> peersList =
+          _knownPeers.values.map((c) => c.toStorageMap()).toList();
+      await prefs.setString('saved_known_peers_v3', jsonEncode(peersList));
 
-      final Set<String> trustedIds = _savedContacts.keys.toSet();
-      final List<Map<String, dynamic>> persistentMessages = _messages
-          .where((m) => trustedIds.contains(m.peerId))
-          .map((m) => m.toMap())
-          .toList();
-      await prefs.setString(
-        'saved_messages_v2',
-        jsonEncode(persistentMessages),
-      );
+      final List<Map<String, dynamic>> allMessages =
+          _messages.map((m) => m.toMap()).toList();
+      await prefs.setString('saved_messages_v3', jsonEncode(allMessages));
     } catch (_) {}
   }
 
@@ -356,36 +375,106 @@ class P2PController extends ChangeNotifier with WidgetsBindingObserver {
     } catch (_) {}
   }
 
+  /// Unifica eventuali vecchie sessioni dello stesso dispositivo (stesso nodeId, IP o alias)
+  /// così da riprendere sempre l'unica chat esistente invece di crearne due.
+  PeerNode _unifyAndRememberPeer(PeerNode incomingPeer, {bool? forceTrusted}) {
+    String? oldDuplicateId;
+    for (final entry in _knownPeers.entries) {
+      if (entry.key != incomingPeer.nodeId &&
+          (entry.value.ipAddress == incomingPeer.ipAddress ||
+              (entry.value.alias.toLowerCase() ==
+                      incomingPeer.alias.toLowerCase() &&
+                  entry.value.platform == incomingPeer.platform))) {
+        oldDuplicateId = entry.key;
+        break;
+      }
+    }
+
+    bool wasTrusted = _knownPeers[incomingPeer.nodeId]?.isTrusted ?? false;
+    if (oldDuplicateId != null) {
+      wasTrusted = wasTrusted || (_knownPeers[oldDuplicateId]?.isTrusted ?? false);
+      _knownPeers.remove(oldDuplicateId);
+      // Migra tutti i messaggi della sessione precedente sul nuovo nodeId canonico
+      for (int i = 0; i < _messages.length; i++) {
+        if (_messages[i].peerId == oldDuplicateId) {
+          _messages[i] = _messages[i].copyWith(
+            peerId: incomingPeer.nodeId,
+            peerAlias: incomingPeer.alias,
+          );
+        }
+      }
+    }
+
+    final PeerNode unified = incomingPeer.copyWith(
+      isTrusted: forceTrusted ?? wasTrusted,
+      lastSeen: DateTime.now(),
+    );
+    _knownPeers[unified.nodeId] = unified;
+    return unified;
+  }
+
   bool isPeerTrusted(String nodeId, [String? ipAddress]) {
-    if (_savedContacts.containsKey(nodeId)) return true;
+    if (_knownPeers[nodeId]?.isTrusted == true) return true;
     if (ipAddress != null && ipAddress.isNotEmpty) {
-      return _savedContacts.values.any((c) => c.ipAddress == ipAddress);
+      return _knownPeers.values
+          .any((c) => c.isTrusted && c.ipAddress == ipAddress);
     }
     return false;
   }
 
   Future<void> toggleSaveContact(PeerNode peer, {String? customAlias}) async {
-    if (_savedContacts.containsKey(peer.nodeId)) {
-      _savedContacts.remove(peer.nodeId);
-      if (_selectedPeer?.nodeId == peer.nodeId) {
-        _selectedPeer = _selectedPeer!.copyWith(isTrusted: false);
-      }
-      _setBanner('${peer.alias} rimosso dai Contatti Fidati.');
-    } else {
-      final PeerNode saved = peer.copyWith(
-        alias: (customAlias != null && customAlias.trim().isNotEmpty)
-            ? customAlias.trim()
-            : peer.alias,
-        isTrusted: true,
-      );
-      _savedContacts[peer.nodeId] = saved;
-      if (_selectedPeer?.nodeId == peer.nodeId) {
-        _selectedPeer = saved.copyWith(isOnline: peer.isOnline);
-      }
-      _setBanner('${saved.alias} salvato nei Contatti Fidati.');
+    final bool currentlyTrusted = _knownPeers[peer.nodeId]?.isTrusted ?? false;
+    final PeerNode updated = peer.copyWith(
+      alias: (customAlias != null && customAlias.trim().isNotEmpty)
+          ? customAlias.trim()
+          : peer.alias,
+      isTrusted: !currentlyTrusted,
+    );
+    _knownPeers[peer.nodeId] = updated;
+
+    if (_selectedPeer?.nodeId == peer.nodeId) {
+      _selectedPeer = updated.copyWith(isOnline: peer.isOnline);
     }
+    _setBanner(
+      updated.isTrusted
+          ? '${updated.alias} aggiunto ai Contatti Fidati (ricezione file automatica).'
+          : '${updated.alias} rimosso dai Contatti Fidati.',
+    );
     await _persistContactsAndMessages();
     notifyListeners();
+  }
+
+  /// Elimina manualmente una chat (e i relativi messaggi salvati)
+  Future<void> deleteChat(
+    String peerId, {
+    bool alsoRemoveTrusted = false,
+  }) async {
+    _messages.removeWhere((m) => m.peerId == peerId);
+    _unreadCounts.remove(peerId);
+
+    if (alsoRemoveTrusted || (_knownPeers[peerId]?.isTrusted == false)) {
+      _knownPeers.remove(peerId);
+    }
+
+    if (_selectedPeer?.nodeId == peerId) {
+      _selectedPeer = null;
+    }
+
+    await _persistContactsAndMessages();
+    _setBanner('Chat eliminata.');
+    notifyListeners();
+  }
+
+  String _formatBytesCompact(int bytes) {
+    if (bytes <= 0) return '0 B';
+    const suffixes = ['B', 'KB', 'MB', 'GB'];
+    int i = 0;
+    double size = bytes.toDouble();
+    while (size >= 1024 && i < suffixes.length - 1) {
+      size /= 1024;
+      i++;
+    }
+    return '${size.toStringAsFixed(1)} ${suffixes[i]}';
   }
 
   Future<bool> _handleIncomingFilePermission(
@@ -398,6 +487,16 @@ class P2PController extends ChangeNotifier with WidgetsBindingObserver {
     if (_sfxEnabled) {
       unawaited(_soundService.playIncomingRequestSfx());
     }
+
+    // Mostra anche la notifica Android con i pulsanti Accetta / Rifiuta per quando l'app è in background
+    unawaited(
+      _notifService.showIncomingFileRequestNotification(
+        transferId: request.transferId,
+        senderAlias: request.senderAlias,
+        fileName: request.fileName,
+        formattedSize: _formatBytesCompact(request.fileSizeBytes),
+      ),
+    );
 
     final Completer<bool> completer = Completer<bool>();
     final PendingRequestItem item = PendingRequestItem(
@@ -414,6 +513,7 @@ class P2PController extends ChangeNotifier with WidgetsBindingObserver {
       );
     } finally {
       _pendingFileRequests.remove(item);
+      unawaited(_notifService.cancelRequestNotification(request.transferId));
       notifyListeners();
     }
   }
@@ -423,18 +523,24 @@ class P2PController extends ChangeNotifier with WidgetsBindingObserver {
     required bool accept,
     bool trustSender = false,
   }) async {
-    if (trustSender && accept) {
-      final PeerNode newTrusted = PeerNode(
+    unawaited(_notifService.cancelRequestNotification(item.request.transferId));
+
+    if (accept) {
+      final PeerNode senderNode = PeerNode(
         nodeId: item.request.senderId,
         alias: item.request.senderAlias,
         ipAddress: item.request.senderIp,
         tcpPort: NetworkConstants.tcpTransferPort,
         platform: PeerPlatform.unknown,
         lastSeen: DateTime.now(),
-        isTrusted: true,
+        isTrusted: trustSender ||
+            isPeerTrusted(item.request.senderId, item.request.senderIp),
         isOnline: true,
       );
-      _savedContacts[newTrusted.nodeId] = newTrusted;
+      _unifyAndRememberPeer(
+        senderNode,
+        forceTrusted: trustSender ? true : null,
+      );
       await _persistContactsAndMessages();
     }
 
@@ -445,20 +551,46 @@ class P2PController extends ChangeNotifier with WidgetsBindingObserver {
     notifyListeners();
   }
 
+  void _handleTransferTaskUpdated(ActiveTransferTask? task) {
+    final ActiveTransferTask? previous = _activeTransferTask;
+    _activeTransferTask = task;
+
+    if (task != null) {
+      final int pct = (task.progress * 100).round();
+      if (pct != _lastNotifiedProgressPct ||
+          task.state != previous?.state) {
+        _lastNotifiedProgressPct = pct;
+        unawaited(
+          _notifService.showTransferProgressNotification(
+            fileName: task.fileName,
+            peerAlias: task.peerAlias,
+            isOutgoing: task.isOutgoing,
+            progressPercent: pct,
+            isPaused: task.state == TransferTaskState.paused,
+          ),
+        );
+      }
+    } else if (previous != null) {
+      _lastNotifiedProgressPct = -1;
+    }
+
+    notifyListeners();
+  }
+
+  /// Comandi utente per Pausa / Riprendi / Annulla del trasferimento in corso
+  void pauseTransfer() => _transferService.pauseActiveTransfer();
+  void resumeTransfer() => _transferService.resumeActiveTransfer();
+  void cancelTransfer() => _transferService.cancelActiveTransfer();
+
   Future<void> _initializeNetworking() async {
     _discoveryService.networkChangeStream.listen((newIp) async {
-      _isTransferring = false;
-      _activeTransferProgress = 0.0;
-
       if (newIp == null) {
         _setBanner(
-          'Rete Wi-Fi disconnessa. Le chat salvate restano consultabili.',
+          'Rete Wi-Fi disconnessa. Le tue chat salvate restano sempre disponibili.',
           isError: true,
         );
       } else {
-        await _transferService.startServer(
-          onIncomingProgress: _handleTransferProgress,
-        );
+        await _transferService.startServer();
       }
       notifyListeners();
     });
@@ -466,26 +598,34 @@ class P2PController extends ChangeNotifier with WidgetsBindingObserver {
     _discoveryService.peersStream.listen((updatedPeers) {
       _onlinePeers = updatedPeers;
 
-      bool contactsUpdated = false;
+      bool knownUpdated = false;
       for (final online in _onlinePeers) {
-        if (_savedContacts.containsKey(online.nodeId)) {
-          final PeerNode existing = _savedContacts[online.nodeId]!;
-          if (existing.ipAddress != online.ipAddress) {
-            _savedContacts[online.nodeId] = existing.copyWith(
-              ipAddress: online.ipAddress,
-              lastSeen: DateTime.now(),
-            );
-            contactsUpdated = true;
+        if (_knownPeers.containsKey(online.nodeId)) {
+          _unifyAndRememberPeer(online);
+          knownUpdated = true;
+        } else {
+          // Controlla se corrisponde a un dispositivo già noto con altro ID temporaneo
+          final bool matchesExisting = _knownPeers.values.any(
+            (k) =>
+                k.ipAddress == online.ipAddress ||
+                (k.alias.toLowerCase() == online.alias.toLowerCase() &&
+                    k.platform == online.platform),
+          );
+          if (matchesExisting) {
+            _unifyAndRememberPeer(online);
+            knownUpdated = true;
           }
         }
       }
-      if (contactsUpdated) {
+      if (knownUpdated) {
         unawaited(_persistContactsAndMessages());
       }
 
       if (_selectedPeer != null) {
         final PeerNode? refreshed = peers.cast<PeerNode?>().firstWhere(
-              (p) => p?.nodeId == _selectedPeer!.nodeId,
+              (p) =>
+                  p?.nodeId == _selectedPeer!.nodeId ||
+                  p?.ipAddress == _selectedPeer!.ipAddress,
               orElse: () => null,
             );
         if (refreshed != null) {
@@ -498,44 +638,47 @@ class P2PController extends ChangeNotifier with WidgetsBindingObserver {
     });
 
     _transferService.discoveredPeerStream.listen((peer) {
-      for (int i = 0; i < _messages.length; i++) {
-        if (_messages[i].peerId == 'manual-${peer.ipAddress}:${peer.tcpPort}') {
-          _messages[i] = _messages[i].copyWith(
-            peerId: peer.nodeId,
-            peerAlias: peer.alias,
-          );
-        }
-      }
-
       final PeerNode verified =
           _discoveryService.registerVerifiedPeer(peer, pin: true);
-      final bool trusted = isPeerTrusted(verified.nodeId, verified.ipAddress);
-      if (trusted && !_savedContacts.containsKey(verified.nodeId)) {
-        _savedContacts[verified.nodeId] = verified.copyWith(isTrusted: true);
-        unawaited(_persistContactsAndMessages());
-      }
+      final PeerNode unified = _unifyAndRememberPeer(verified);
+      unawaited(_persistContactsAndMessages());
 
       if (_selectedPeer != null &&
-          _selectedPeer!.ipAddress == verified.ipAddress) {
-        _selectedPeer = verified.copyWith(isTrusted: trusted, isOnline: true);
+          (_selectedPeer!.ipAddress == unified.ipAddress ||
+              _selectedPeer!.nodeId == unified.nodeId)) {
+        _selectedPeer = unified.copyWith(isOnline: true);
       }
       notifyListeners();
     });
 
     _transferService.incomingMessages.listen((msg) {
+      // Assicura che il mittente sia salvato tra i peer conosciuti così la chat resta permanente
+      final PeerNode? existingPeer = peers.cast<PeerNode?>().firstWhere(
+            (p) => p?.nodeId == msg.peerId,
+            orElse: () => null,
+          );
+      if (existingPeer != null) {
+        _unifyAndRememberPeer(existingPeer);
+      } else {
+        _knownPeers[msg.peerId] = PeerNode(
+          nodeId: msg.peerId,
+          alias: msg.peerAlias,
+          ipAddress: '',
+          tcpPort: NetworkConstants.tcpTransferPort,
+          platform: PeerPlatform.unknown,
+          lastSeen: DateTime.now(),
+          isTrusted: false,
+          isOnline: true,
+        );
+      }
+
       _messages.add(msg);
-      _isTransferring = false;
-      _activeTransferProgress = 0.0;
 
       if (_selectedPeer == null || _selectedPeer!.nodeId != msg.peerId) {
         _unreadCounts[msg.peerId] = (_unreadCounts[msg.peerId] ?? 0) + 1;
       }
 
       if (msg.type == TransferPayloadType.binaryFile) {
-        final PeerNode? senderNode = peers.cast<PeerNode?>().firstWhere(
-              (p) => p?.nodeId == msg.peerId,
-              orElse: () => null,
-            );
         _fileHistory.insert(
           0,
           FileHistoryEntry(
@@ -545,12 +688,20 @@ class P2PController extends ChangeNotifier with WidgetsBindingObserver {
             fileSizeBytes: msg.fileSize ?? 0,
             peerId: msg.peerId,
             peerAlias: msg.peerAlias,
-            peerIp: senderNode?.ipAddress ?? '',
+            peerIp: existingPeer?.ipAddress ?? '',
             isOutgoing: false,
             timestamp: msg.timestamp,
           ),
         );
         unawaited(_persistFileHistory());
+        unawaited(
+          _notifService.showTransferCompletedNotification(
+            fileName: msg.content,
+            peerAlias: msg.peerAlias,
+            isOutgoing: false,
+            success: true,
+          ),
+        );
       }
 
       unawaited(_persistContactsAndMessages());
@@ -560,17 +711,9 @@ class P2PController extends ChangeNotifier with WidgetsBindingObserver {
     await _startServers();
   }
 
-  void _handleTransferProgress(String _, int transferred, int total) {
-    _isTransferring = true;
-    _activeTransferProgress = total > 0 ? transferred / total : 0.0;
-    notifyListeners();
-  }
-
   Future<void> _startServers() async {
     try {
-      await _transferService.startServer(
-        onIncomingProgress: _handleTransferProgress,
-      );
+      await _transferService.startServer();
       await _discoveryService.startDiscovery();
       notifyListeners();
     } catch (e) {
@@ -655,42 +798,34 @@ class P2PController extends ChangeNotifier with WidgetsBindingObserver {
     );
 
     if (verifiedPeer != null) {
-      final PeerNode finalPeer =
-          (customAlias != null && customAlias.trim().isNotEmpty)
-              ? verifiedPeer.copyWith(
-                  alias: customAlias.trim(),
-                  isTrusted: saveAsTrusted ||
-                      isPeerTrusted(verifiedPeer.nodeId, cleanIp),
-                )
-              : verifiedPeer.copyWith(
-                  isTrusted: saveAsTrusted ||
-                      isPeerTrusted(verifiedPeer.nodeId, cleanIp),
-                );
+      final PeerNode finalPeer = _unifyAndRememberPeer(
+        (customAlias != null && customAlias.trim().isNotEmpty)
+            ? verifiedPeer.copyWith(alias: customAlias.trim())
+            : verifiedPeer,
+        forceTrusted: saveAsTrusted ? true : null,
+      );
       _discoveryService.registerVerifiedPeer(finalPeer, pin: true);
-      if (finalPeer.isTrusted) {
-        _savedContacts[finalPeer.nodeId] = finalPeer;
-        await _persistContactsAndMessages();
-      }
-      selectPeer(finalPeer);
+      await _persistContactsAndMessages();
+      selectPeer(finalPeer.copyWith(isOnline: true));
       return true;
     } else {
-      final PeerNode fallbackNode = PeerNode(
-        nodeId: 'manual-$cleanIp:$resolvedPort',
-        alias: (customAlias != null && customAlias.trim().isNotEmpty)
-            ? customAlias.trim()
-            : 'Host ($cleanIp)',
-        ipAddress: cleanIp,
-        tcpPort: resolvedPort,
-        platform: PeerPlatform.unknown,
-        lastSeen: DateTime.now(),
-        isTrusted: saveAsTrusted,
-        isOnline: true,
+      final PeerNode fallbackNode = _unifyAndRememberPeer(
+        PeerNode(
+          nodeId: 'manual-$cleanIp:$resolvedPort',
+          alias: (customAlias != null && customAlias.trim().isNotEmpty)
+              ? customAlias.trim()
+              : 'Host ($cleanIp)',
+          ipAddress: cleanIp,
+          tcpPort: resolvedPort,
+          platform: PeerPlatform.unknown,
+          lastSeen: DateTime.now(),
+          isTrusted: saveAsTrusted,
+          isOnline: true,
+        ),
+        forceTrusted: saveAsTrusted ? true : null,
       );
       _discoveryService.registerVerifiedPeer(fallbackNode, pin: true);
-      if (saveAsTrusted) {
-        _savedContacts[fallbackNode.nodeId] = fallbackNode;
-        await _persistContactsAndMessages();
-      }
+      await _persistContactsAndMessages();
       selectPeer(fallbackNode);
       _discoveryService.sendReverseConnectRequest(cleanIp);
       return true;
@@ -728,13 +863,6 @@ class P2PController extends ChangeNotifier with WidgetsBindingObserver {
     notifyListeners();
   }
 
-  Future<void> setUiStyle(AppUiStyle style) async {
-    _uiStyle = style;
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('ui_style', style.name);
-    notifyListeners();
-  }
-
   Future<void> toggleSfx(bool value) async {
     _sfxEnabled = value;
     final prefs = await SharedPreferences.getInstance();
@@ -754,20 +882,43 @@ class P2PController extends ChangeNotifier with WidgetsBindingObserver {
         targetPeer: target,
         messageText: text.trim(),
       );
+      _unifyAndRememberPeer(target);
       _messages.add(sent);
       _statusBanner = null;
       await _persistContactsAndMessages();
       notifyListeners();
     } catch (e) {
       _setBanner(
-        'Host ${target.alias} non raggiungibile sulla rete locale.',
+        'Host ${target.alias} al momento offline. Riprova quando è connesso.',
         isError: true,
       );
     }
   }
 
+  /// Invia uno o più file trascinati (Drag & Drop su Desktop) nella chat attiva
+  Future<void> sendDroppedFiles(List<String> filePaths) async {
+    final PeerNode? target = _selectedPeer;
+    if (target == null || filePaths.isEmpty) return;
+
+    for (final path in filePaths) {
+      final File file = File(path);
+      if (!file.existsSync()) continue;
+      // Ignora eventuali cartelle trascinate
+      if (FileSystemEntity.isDirectorySync(path)) continue;
+
+      final String fileName = path.split(Platform.pathSeparator).last;
+      final int totalBytes = await file.length();
+      await _executeFileTransfer(
+        target: target,
+        fileName: fileName,
+        totalBytes: totalBytes,
+        localFilePath: path,
+      );
+    }
+  }
+
   Future<void> pickAndSendFile({PeerNode? targetOverride}) async {
-    if (_isTransferring) return;
+    if (isTransferring) return;
     final PeerNode? target = targetOverride ?? _selectedPeer;
     if (target == null) return;
 
@@ -794,12 +945,23 @@ class P2PController extends ChangeNotifier with WidgetsBindingObserver {
             ? await File(picked.path!).length()
             : picked.size;
 
-    _isTransferring = true;
-    _activeTransferProgress = 0.0;
-    _statusBanner = !target.isTrusted
-        ? 'In attesa che ${target.alias} accetti il trasferimento...'
-        : null;
-    _isBannerError = false;
+    await _executeFileTransfer(
+      target: target,
+      fileName: fileName,
+      totalBytes: totalBytes,
+      localFilePath: picked.path,
+      fallbackStream: picked.readStream,
+    );
+  }
+
+  Future<void> _executeFileTransfer({
+    required PeerNode target,
+    required String fileName,
+    required int totalBytes,
+    String? localFilePath,
+    Stream<List<int>>? fallbackStream,
+  }) async {
+    _statusBanner = null;
     notifyListeners();
 
     try {
@@ -808,21 +970,18 @@ class P2PController extends ChangeNotifier with WidgetsBindingObserver {
         targetPeer: target,
         fileName: fileName,
         totalBytes: totalBytes,
-        localFilePath: picked.path,
-        fallbackStream: picked.readStream,
-        onProgress: (_, sent, total) {
-          _activeTransferProgress = total > 0 ? sent / total : 0.0;
-          notifyListeners();
-        },
+        localFilePath: localFilePath,
+        fallbackStream: fallbackStream,
       );
 
+      _unifyAndRememberPeer(target);
       _messages.add(sentFileMsg);
       _fileHistory.insert(
         0,
         FileHistoryEntry(
           id: sentFileMsg.id,
           fileName: fileName,
-          filePath: picked.path,
+          filePath: localFilePath,
           fileSizeBytes: totalBytes,
           peerId: target.nodeId,
           peerAlias: target.alias,
@@ -834,12 +993,25 @@ class P2PController extends ChangeNotifier with WidgetsBindingObserver {
 
       await _persistFileHistory();
       await _persistContactsAndMessages();
-      _statusBanner = null;
+      unawaited(
+        _notifService.showTransferCompletedNotification(
+          fileName: fileName,
+          peerAlias: target.alias,
+          isOutgoing: true,
+          success: true,
+        ),
+      );
     } catch (e) {
-      _setBanner('Trasferimento annullato o fallito: $e', isError: true);
+      unawaited(
+        _notifService.showTransferCompletedNotification(
+          fileName: fileName,
+          peerAlias: target.alias,
+          isOutgoing: true,
+          success: false,
+        ),
+      );
+      _setBanner('Trasferimento interrotto: $e', isError: true);
     } finally {
-      _isTransferring = false;
-      _activeTransferProgress = 0.0;
       notifyListeners();
     }
   }
