@@ -1,5 +1,4 @@
 import 'dart:io';
-import 'package:flutter_background/flutter_background.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
 typedef NotificationActionCallback = void Function(
@@ -17,6 +16,7 @@ class NotificationAndBackgroundService {
   NotificationActionCallback? onFileRequestDecision;
   bool _initialized = false;
 
+  static const int _foregroundServiceNotifId = 1001;
   static const int _progressNotifId = 2001;
   static const int _completionNotifId = 2002;
 
@@ -42,26 +42,36 @@ class NotificationAndBackgroundService {
               AndroidFlutterLocalNotificationsPlugin>();
       await androidPlugin?.requestNotificationsPermission();
 
-      await _enableAndroidBackgroundExecution();
+      await _startAndroidForegroundService(androidPlugin);
     }
     _initialized = true;
   }
 
-  Future<void> _enableAndroidBackgroundExecution() async {
-    if (!Platform.isAndroid) return;
+  Future<void> _startAndroidForegroundService(
+    AndroidFlutterLocalNotificationsPlugin? androidPlugin,
+  ) async {
+    if (!Platform.isAndroid || androidPlugin == null) return;
     try {
-      const androidConfig = FlutterBackgroundAndroidConfig(
-        notificationTitle: 'LanPulse P2P Attivo',
-        notificationText:
-            'In ascolto sulla rete Wi-Fi per ricevere file e messaggi',
-        notificationImportance: AndroidNotificationImportance.low,
-        enableWifiLock: true,
+      const AndroidNotificationDetails fgDetails = AndroidNotificationDetails(
+        'lanpulse_bg_service',
+        'Servizio Background LanPulse',
+        channelDescription:
+            'Mantiene attivo il ascolto P2P sulla rete Wi-Fi in background',
+        importance: Importance.low,
+        priority: Priority.low,
+        ongoing: true,
+        playSound: false,
       );
-      final bool hasPermissions =
-          await FlutterBackground.initialize(androidConfig: androidConfig);
-      if (hasPermissions) {
-        await FlutterBackground.enableBackgroundExecution();
-      }
+
+      await androidPlugin.startForegroundService(
+        _foregroundServiceNotifId,
+        'LanPulse P2P Attivo',
+        'In ascolto sulla rete Wi-Fi per ricevere file e messaggi',
+        notificationDetails: fgDetails,
+        foregroundServiceTypes: {
+          AndroidServiceForegroundType.foregroundServiceTypeDataSync,
+        },
+      );
     } catch (_) {}
   }
 
