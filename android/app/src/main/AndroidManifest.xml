@@ -45,6 +45,13 @@
             </intent-filter>
         </activity>
 
+        <!-- Servizio Foreground per mantenere l'app attiva in background -->
+        <service
+            android:name="com.dexterous.flutterlocalnotifications.ForegroundService"
+            android:exported="false"
+            android:stopWithTask="false"
+            android:foregroundServiceType="dataSync" />
+
         <!-- Receiver per le azioni "Accetta" / "Rifiuta" dalle notifiche in background -->
         <receiver
             android:exported="false"
