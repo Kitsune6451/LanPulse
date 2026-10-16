@@ -15,8 +15,7 @@ class _LanPulseSplashScreenState extends State<LanPulseSplashScreen>
   late final Animation<double> _pulseScale;
   late final Animation<double> _rippleRadius;
   late final Animation<double> _rippleOpacity;
-  late final Animation<double> _textWidthFactor;
-  late final Animation<Offset> _textSlide;
+  late final Animation<double> _textRevealFactor;
   late final Animation<double> _textOpacity;
   Timer? _navTimer;
 
@@ -66,27 +65,18 @@ class _LanPulseSplashScreenState extends State<LanPulseSplashScreen>
       ),
     );
 
-    _textWidthFactor = Tween<double>(begin: 0.0, end: 1.0).animate(
+    // Animazione di scorrimento/rivelazione della scritta da sinistra verso destra
+    _textRevealFactor = Tween<double>(begin: 0.0, end: 1.0).animate(
       CurvedAnimation(
         parent: _controller,
-        curve: const Interval(0.28, 0.68, curve: Curves.easeInOutCubic),
-      ),
-    );
-
-    _textSlide = Tween<Offset>(
-      begin: const Offset(-0.25, 0),
-      end: Offset.zero,
-    ).animate(
-      CurvedAnimation(
-        parent: _controller,
-        curve: const Interval(0.32, 0.72, curve: Curves.easeOutExpo),
+        curve: const Interval(0.28, 0.72, curve: Curves.easeInOutCubic),
       ),
     );
 
     _textOpacity = Tween<double>(begin: 0.0, end: 1.0).animate(
       CurvedAnimation(
         parent: _controller,
-        curve: const Interval(0.35, 0.72, curve: Curves.easeOut),
+        curve: const Interval(0.32, 0.70, curve: Curves.easeOut),
       ),
     );
 
@@ -121,15 +111,16 @@ class _LanPulseSplashScreenState extends State<LanPulseSplashScreen>
 
     return Scaffold(
       body: Center(
-        child: AnimatedBuilder(
-          animation: _controller,
-          builder: (context, _) {
-            return Row(
-              mainAxisSize: MainAxisSize.min,
-              mainAxisAlignment: MainAxisAlignment.center,
-              crossAxisAlignment: CrossAxisAlignment.center,
-              children: [
-                Stack(
+        child: SizedBox(
+          width: 280,
+          height: 120,
+          child: Stack(
+            alignment: Alignment.center,
+            children: [
+              // Logo centrato e allineato geometricamente a sinistra del blocco centrale
+              Positioned(
+                left: 20,
+                child: Stack(
                   alignment: Alignment.center,
                   children: [
                     Transform.scale(
@@ -180,52 +171,53 @@ class _LanPulseSplashScreenState extends State<LanPulseSplashScreen>
                     ),
                   ],
                 ),
-                SizeTransition(
-                  axis: Axis.horizontal,
-                  sizeFactor: _textWidthFactor,
-                  axisAlignment: -1.0,
-                  child: Padding(
-                    padding: const EdgeInsets.only(left: 20),
+              ),
+
+              // Scritta "LAN PULSE" posizionata esattamente a fianco del logo (left: 114)
+              Positioned(
+                left: 114,
+                top: 26,
+                child: ClipRect(
+                  child: Align(
+                    alignment: Alignment.centerLeft,
+                    widthFactor: _textRevealFactor.value,
                     child: FadeTransition(
                       opacity: _textOpacity,
-                      child: SlideTransition(
-                        position: _textSlide,
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              'LAN',
-                              style: TextStyle(
-                                fontSize: 32,
-                                fontWeight: FontWeight.w900,
-                                height: 0.95,
-                                letterSpacing: 3.5,
-                                color: isDark
-                                    ? Colors.white
-                                    : const Color(0xFF0F172A),
-                              ),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'LAN',
+                            style: TextStyle(
+                              fontSize: 31,
+                              fontWeight: FontWeight.w900,
+                              height: 0.95,
+                              letterSpacing: 3.5,
+                              color: isDark
+                                  ? Colors.white
+                                  : const Color(0xFF0F172A),
                             ),
-                            const SizedBox(height: 3),
-                            Text(
-                              'PULSE',
-                              style: TextStyle(
-                                fontSize: 32,
-                                fontWeight: FontWeight.w300,
-                                height: 0.95,
-                                letterSpacing: 4.5,
-                                color: accent,
-                              ),
+                          ),
+                          const SizedBox(height: 3),
+                          Text(
+                            'PULSE',
+                            style: TextStyle(
+                              fontSize: 31,
+                              fontWeight: FontWeight.w300,
+                              height: 0.95,
+                              letterSpacing: 4.5,
+                              color: accent,
                             ),
-                          ],
-                        ),
+                          ),
+                        ],
                       ),
                     ),
                   ),
                 ),
-              ],
-            );
-          },
+              ),
+            ],
+          ),
         ),
       ),
     );
