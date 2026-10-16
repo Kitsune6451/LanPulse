@@ -16,17 +16,23 @@ class NetworkConstants {
   /// Indirizzo Multicast IPv4 locale per reti in cui 255.255.255.255 è filtrato
   static const String multicastGroupIp = '239.255.45.45';
 
-  /// Dimensione del singolo frammento di pacchetto file (64 KB)
-  static const int fileChunkSizeBytes = 64 * 1024;
+  /// Dimensione del frammento file ottimizzata per alto throughput (512 KB)
+  static const int fileChunkSizeBytes = 512 * 1024;
 
-  /// Numero di frammenti dopo i quali il destinatario invia un ACK di flusso (32 * 64KB = 2 MB)
-  static const int ackWindowChunks = 32;
+  /// Flush del buffer TCP di invio ogni 16 frammenti (8 MB) senza bloccare il disco
+  static const int socketFlushEveryChunks = 16;
 
-  /// Codici di controllo socket per permessi e frammentazione
+  /// Codici di controllo socket per permessi, pausa, ripresa e annullamento
   static const int ctrlRejected = 0x00;
   static const int ctrlAccepted = 0x01;
-  static const int ctrlChunkWindowAck = 0x02;
   static const int ctrlTransferCompleteAck = 0x03;
+
+  /// Frame e segnali di controllo stato trasferimento (Pausa / Riprendi / Annulla)
+  static const int frameDataChunk = 0x01;
+  static const int frameEof = 0x02;
+  static const int ctrlPause = 0x10;
+  static const int ctrlResume = 0x11;
+  static const int ctrlCancel = 0x12;
 
   /// Intervallo di invio del beacon di presenza UDP
   static const Duration heartbeatInterval = Duration(seconds: 3);
