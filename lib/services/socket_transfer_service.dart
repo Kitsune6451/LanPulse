@@ -17,7 +17,6 @@ typedef FilePermissionCheckCallback = Future<bool> Function(
   IncomingFileRequest request,
 );
 
-/// Lettore asincrono ad alte prestazioni che intercetta anche segnali di Pausa/Riprendi/Annulla
 class _BufferedSocketReader {
   final BytesBuilder _buffer = BytesBuilder(copy: false);
   final Queue<Completer<void>> _waiters = Queue<Completer<void>>();
@@ -35,8 +34,6 @@ class _BufferedSocketReader {
       (Uint8List data) {
         if (data.isEmpty) return;
         if (interceptSingleControlBytes && onOutOfBandControlByte != null) {
-          // Quando il mittente sta inviando un file, i byte ricevuti dal destinatario
-          // sono segnali di controllo (PAUSE / RESUME / CANCEL / COMPLETE_ACK)
           for (final int b in data) {
             if (b == NetworkConstants.ctrlPause ||
                 b == NetworkConstants.ctrlResume ||
@@ -127,7 +124,6 @@ class SocketTransferService {
   ServerSocket? _serverSocket;
   final Uuid _uuid = const Uuid();
 
-  /// Controlli per Pausa / Riprendi / Annulla del trasferimento attivo
   Socket? _activeTransferSocket;
   ActiveTransferTask? _currentTask;
   bool _isPaused = false;
@@ -169,7 +165,6 @@ class SocketTransferService {
     };
   }
 
-  /// Mette in pausa il trasferimento attivo (sia in invio che in ricezione)
   void pauseActiveTransfer() {
     if (_currentTask == null || _isPaused) return;
     _isPaused = true;
@@ -184,7 +179,6 @@ class SocketTransferService {
     onTransferTaskUpdated?.call(_currentTask);
   }
 
-  /// Riprende il trasferimento messo in pausa
   void resumeActiveTransfer() {
     if (_currentTask == null || !_isPaused) return;
     _isPaused = false;
@@ -198,7 +192,6 @@ class SocketTransferService {
     onTransferTaskUpdated?.call(_currentTask);
   }
 
-  /// Annulla immediatamente il trasferimento in corso e pulisce i file parziali
   void cancelActiveTransfer() {
     if (_currentTask == null) return;
     _isCancelled = true;
@@ -253,7 +246,6 @@ class SocketTransferService {
 
   Future<void> startServer() async {
     await stopServer();
-
     if (Platform.isWindows) {
       _tryConfigureWindowsFirewall();
     }
@@ -282,17 +274,6 @@ class SocketTransferService {
         'action=allow',
         'protocol=TCP',
         'localport=$listenPort',
-      ]);
-      Process.run('netsh', [
-        'advfirewall',
-        'firewall',
-        'add',
-        'rule',
-        'name=LanPulse P2P UDP',
-        'dir=in',
-        'action=allow',
-        'protocol=UDP',
-        'localport=${NetworkConstants.udpDiscoveryPort}',
       ]);
     } catch (_) {}
   }
@@ -487,7 +468,6 @@ class SocketTransferService {
         return;
       }
 
-      // Ricezione File Binario
       final IncomingFileRequest fileReq = IncomingFileRequest(
         transferId: parsedHeader.transferId,
         senderId: parsedHeader.senderId,
@@ -743,8 +723,6 @@ class SocketTransferService {
     );
   }
 
-  /// Invio file in streaming a 512 KB per pacchetto ad altissimo throughput,
-  /// con supporto bidirezionale a Pausa, Riprendi e Annulla.
   Future<P2PChatMessage> sendFileFragmented({
     required PeerNode targetPeer,
     required String fileName,
@@ -807,7 +785,6 @@ class SocketTransferService {
         );
       }
 
-      // Abilita l'intercettazione immediata dei segnali PAUSE/RESUME/CANCEL dal destinatario
       reader.interceptSingleControlBytes = true;
       _currentTask = _currentTask?.copyWith(state: TransferTaskState.running);
       onTransferTaskUpdated?.call(_currentTask);
@@ -852,7 +829,6 @@ class SocketTransferService {
           onTransferTaskUpdated?.call(_currentTask);
         }
 
-        // Flush del socket ogni 16 frammenti (8 MB) senza attendere ack round-trip
         if (chunksSentSinceFlush >= NetworkConstants.socketFlushEveryChunks ||
             sentBytes >= totalBytes) {
           await socket.flush();
@@ -893,7 +869,6 @@ class SocketTransferService {
         throw Exception('Sorgente file non disponibile.');
       }
 
-      // Invia marker EOF e attende conferma finale di chiusura file
       socket.add(const [NetworkConstants.frameEof]);
       await socket.flush();
 
