@@ -15,6 +15,7 @@ class _LanPulseSplashScreenState extends State<LanPulseSplashScreen>
   late final Animation<double> _pulseScale;
   late final Animation<double> _rippleRadius;
   late final Animation<double> _rippleOpacity;
+  late final Animation<double> _textWidthFactor;
   late final Animation<Offset> _textSlide;
   late final Animation<double> _textOpacity;
   Timer? _navTimer;
@@ -25,69 +26,74 @@ class _LanPulseSplashScreenState extends State<LanPulseSplashScreen>
 
     _controller = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 1800),
+      duration: const Duration(milliseconds: 1900),
     );
 
-    // Sequenza doppio battito cardiaco per il logo
+    // Battito del logo al centro nei primi 0.5s, seguito dal secondo impulso
     _pulseScale = TweenSequence<double>([
       TweenSequenceItem(
-        tween: Tween(begin: 0.85, end: 1.18)
+        tween: Tween(begin: 0.85, end: 1.22)
             .chain(CurveTween(curve: Curves.easeOutCubic)),
-        weight: 18,
+        weight: 16,
       ),
       TweenSequenceItem(
-        tween: Tween(begin: 1.18, end: 0.94)
+        tween: Tween(begin: 1.22, end: 0.95)
             .chain(CurveTween(curve: Curves.easeInOut)),
-        weight: 14,
+        weight: 12,
       ),
       TweenSequenceItem(
-        tween: Tween(begin: 0.94, end: 1.14)
+        tween: Tween(begin: 0.95, end: 1.12)
             .chain(CurveTween(curve: Curves.easeOutBack)),
-        weight: 18,
+        weight: 16,
       ),
       TweenSequenceItem(
-        tween: Tween(begin: 1.14, end: 1.0)
+        tween: Tween(begin: 1.12, end: 1.0)
             .chain(CurveTween(curve: Curves.easeOutCubic)),
-        weight: 50,
+        weight: 56,
       ),
     ]).animate(_controller);
 
-    // Onda d'urto radar dietro al logo
-    _rippleRadius = Tween<double>(begin: 0.8, end: 1.75).animate(
+    _rippleRadius = Tween<double>(begin: 0.85, end: 1.85).animate(
       CurvedAnimation(
         parent: _controller,
-        curve: const Interval(0.05, 0.75, curve: Curves.easeOutQuart),
+        curve: const Interval(0.0, 0.55, curve: Curves.easeOutQuart),
       ),
     );
 
-    _rippleOpacity = Tween<double>(begin: 0.6, end: 0.0).animate(
+    _rippleOpacity = Tween<double>(begin: 0.65, end: 0.0).animate(
       CurvedAnimation(
         parent: _controller,
-        curve: const Interval(0.05, 0.75, curve: Curves.easeOut),
+        curve: const Interval(0.0, 0.55, curve: Curves.easeOut),
       ),
     );
 
-    // Comparsa a destra della scritta "LAN \n PULSE"
+    // Per i primi ~0.55 secondi (fino a 0.28) la larghezza del testo è 0 -> il logo è al centro!
+    // Poi si espande spostando il logo a sinistra e facendo apparire "LAN\nPULSE"
+    _textWidthFactor = Tween<double>(begin: 0.0, end: 1.0).animate(
+      CurvedAnimation(
+        parent: _controller,
+        curve: const Interval(0.28, 0.68, curve: Curves.easeInOutCubic),
+      ),
+    );
+
     _textSlide = Tween<Offset>(
-      begin: const Offset(-0.35, 0),
+      begin: const Offset(-0.25, 0),
       end: Offset.zero,
     ).animate(
       CurvedAnimation(
         parent: _controller,
-        curve: const Interval(0.22, 0.68, curve: Curves.easeOutExpo),
+        curve: const Interval(0.32, 0.72, curve: Curves.easeOutExpo),
       ),
     );
 
     _textOpacity = Tween<double>(begin: 0.0, end: 1.0).animate(
       CurvedAnimation(
         parent: _controller,
-        curve: const Interval(0.24, 0.62, curve: Curves.easeOut),
+        curve: const Interval(0.35, 0.72, curve: Curves.easeOut),
       ),
     );
 
     _controller.forward();
-
-    // Durata esatta di 2 secondi prima di entrare nell'app
     _navTimer = Timer(const Duration(milliseconds: 2000), _goToHome);
   }
 
@@ -125,15 +131,14 @@ class _LanPulseSplashScreenState extends State<LanPulseSplashScreen>
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.center,
               children: [
-                // Logo che batte con anello d'impulso
                 Stack(
                   alignment: Alignment.center,
                   children: [
                     Transform.scale(
                       scale: _rippleRadius.value,
                       child: Container(
-                        width: 76,
-                        height: 76,
+                        width: 78,
+                        height: 78,
                         decoration: BoxDecoration(
                           borderRadius: BorderRadius.circular(24),
                           border: Border.all(
@@ -148,8 +153,8 @@ class _LanPulseSplashScreenState extends State<LanPulseSplashScreen>
                     Transform.scale(
                       scale: _pulseScale.value,
                       child: Container(
-                        width: 76,
-                        height: 76,
+                        width: 78,
+                        height: 78,
                         decoration: BoxDecoration(
                           gradient: LinearGradient(
                             begin: Alignment.topLeft,
@@ -170,49 +175,53 @@ class _LanPulseSplashScreenState extends State<LanPulseSplashScreen>
                         ),
                         child: const Icon(
                           Icons.bolt_rounded,
-                          size: 42,
+                          size: 44,
                           color: Colors.white,
                         ),
                       ),
                     ),
                   ],
                 ),
-                const SizedBox(width: 20),
-
-                // Scritta "LAN \n PULSE" che spunta a destra
-                ClipRect(
-                  child: FadeTransition(
-                    opacity: _textOpacity,
-                    child: SlideTransition(
-                      position: _textSlide,
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            'LAN',
-                            style: TextStyle(
-                              fontSize: 32,
-                              fontWeight: FontWeight.w900,
-                              height: 0.95,
-                              letterSpacing: 3.5,
-                              color: isDark
-                                  ? Colors.white
-                                  : const Color(0xFF0F172A),
+                // Espansione orizzontale dopo 0.5s che spinge il logo a sinistra
+                SizeTransition(
+                  axis: Axis.horizontal,
+                  sizeFactor: _textWidthFactor,
+                  axisAlignment: -1.0,
+                  child: Padding(
+                    padding: const EdgeInsets.only(left: 20),
+                    child: FadeTransition(
+                      opacity: _textOpacity,
+                      child: SlideTransition(
+                        position: _textSlide,
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'LAN',
+                              style: TextStyle(
+                                fontSize: 32,
+                                fontWeight: FontWeight.w900,
+                                height: 0.95,
+                                letterSpacing: 3.5,
+                                color: isDark
+                                    ? Colors.white
+                                    : const Color(0xFF0F172A),
+                              ),
                             ),
-                          ),
-                          const SizedBox(height: 3),
-                          Text(
-                            'PULSE',
-                            style: TextStyle(
-                              fontSize: 32,
-                              fontWeight: FontWeight.w300,
-                              height: 0.95,
-                              letterSpacing: 4.5,
-                              color: accent,
+                            const SizedBox(height: 3),
+                            Text(
+                              'PULSE',
+                              style: TextStyle(
+                                fontSize: 32,
+                                fontWeight: FontWeight.w300,
+                                height: 0.95,
+                                letterSpacing: 4.5,
+                                color: accent,
+                              ),
                             ),
-                          ),
-                        ],
+                          ],
+                        ),
                       ),
                     ),
                   ),
